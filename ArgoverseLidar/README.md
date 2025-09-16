@@ -1,9 +1,9 @@
 # Argoverse 2 LiDAR Toolkit
 
-Utilities for downloading, inspecting, and geolocating Argoverse 2 LiDAR logs without touching the rest of the repo.
+Helpers for pulling down manageable slices of the Argoverse 2 LiDAR dataset and poking at the sweeps/poses without touching the rest of the repo.
 
 ## Setup
-Use either conda or pip inside this folder:
+Create an environment inside this folder with either conda or pip:
 
 ```powershell
 conda env create -f environment.yml
@@ -16,33 +16,27 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## Key tools
-- `s5cmd/` – Bundled `s5cmd.exe` (v2.3.0) plus upstream docs.
-- `download_sample_logs.py` – Pull a capped number of logs per split into `../argverse_data_preview`.
-- `download_full_dataset.py` – Wrapper around `s5cmd sync` to mirror the entire LiDAR bucket.
-- `preview_lidar_gui.py` – Open3D viewer for any LiDAR `.feather` sweep.
-- `preview_city_pose_gui.py` – Tkinter table view of `city_SE3_egovehicle.feather` pose files with per-log stats.
-- `plot_pose_on_map.py` – Convert a pose file to WGS84 and render the trajectory as small dots and a red path on OpenStreetMap tiles.
+## Download sample logs
+`download_sample_logs.py` lists the S3 prefixes under `s3://argoverse/datasets/av2/lidar/` and syncs a limited number of logs per split via the bundled `s5cmd` binary. By default it fetches 100 validation logs into `..\argverse_data_preview\val`, auto-creating the destination if needed.
 
-## Common commands
-Download a manageable preview sample:
-```powershell
-python download_sample_logs.py --split val --count 100 --dest ..\argverse_data_preview --skip-existing
-```
+Key flags:
+- `--split` repeatable; defaults to just `val`.
+- `--count` number of logs per split to mirror (default `100`).
+- `--dest` target directory (default `..\argverse_data_preview`).
+- `--skip-existing` leaves already-downloaded logs untouched.
+- `--concurrency`, `--part-size`, and `--extra-arg` are forwarded to `s5cmd` for tuning throughput.
+- `--s5cmd` overrides the path to the executable if you have your own build.
 
-Mirror the full dataset (expect TBs and hours):
+Example command:
 ```powershell
-python download_full_dataset.py --dest ..\Argoverse2LidarData --concurrency 32 --part-size 128
+python download_sample_logs.py --split train --split val --count 25 --skip-existing
 ```
+The script streams the `s5cmd` output so you can keep an eye on progress and abort safely with Ctrl+C.
 
-Inspect a LiDAR sweep or pose table:
-```powershell
-python preview_lidar_gui.py --feather ..\argverse_data_preview\val\<log_id>\sensors\lidar\<timestamp>.feather
-python preview_city_pose_gui.py --file ..\argverse_data_preview\val\<log_id>\city_SE3_egovehicle.feather
-```
+## Visualisation utilities
+- `preview_lidar_gui.py` opens a Tkinter list of `.feather` sweeps and renders the selected cloud in Open3D. Use `--root` to point at a custom folder and `--stride` to subsample points.
+- `preview_city_pose_gui.py` loads a `city_SE3_egovehicle.feather` file, summarises timestamps/translations, and shows up to 500 rows in a table. Launch it with `python preview_city_pose_gui.py --file <path>` or use the built-in file picker.
+- `plot_pose_on_map.py` converts pose translations to WGS84 using the published anchors and writes an interactive HTML map. Pass `--pose <path>` plus optional `--city`, `--output`, and `--no-open` flags.
 
-Plot a trajectory on OpenStreetMap (opens the HTML by default):
-```powershell
-python plot_pose_on_map.py --pose ..\argverse_data_preview\val\<log_id>\city_SE3_egovehicle.feather
-```
-Use `--city` if you need to override the inferred city code, `--output` to control the HTML path, and `--no-open` to skip launching a browser.
+## Bundled `s5cmd`
+The `s5cmd/` folder contains `s5cmd.exe` (v2.3.0) and upstream documentation so Windows users do not need to install it separately. The downloader script points to this binary by default but accepts a custom path when required.
