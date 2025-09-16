@@ -1,0 +1,7 @@
+waymo-od/
+*.pem
+CA_SanFrancisco_B23/
+.claude/
+Toronto_3D/
+argverse_data_preview/
+s5cmd/

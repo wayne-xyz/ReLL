@@ -1,0 +1,11 @@
+name: argoverse-lidar
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - pandas
+  - pyarrow
+  - open3d
+  - pyproj
+  - folium
