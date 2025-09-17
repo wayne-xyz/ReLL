@@ -52,6 +52,8 @@ The script streams the `s5cmd` output so you can keep an eye on progress and abo
 - `aggregate_heatmap_cells.py` buckets the pose table into 500 m × 500 m UTM cells per city and records the point density (`city_heatmap_cells.json`).
 - `compute_city_bounds.py` and `render_city_bounds_map.py` create a quick bounds overlay (`city_bounds.json` → `city_bounds_map.html`).
 - `render_city_heatmap_map.py` layers the per-city rectangles and the heatmap cells onto OpenStreetMap (`city_heatmap_map.html`), modulating opacity between 0.1–0.8 based on counts.
+  
+<img width="2342" height="2486" alt="Heatmap Records Lidar R" src="https://github.com/user-attachments/assets/24067b18-44ba-49ce-b101-f15b46a72287" />
 
 ## Bundled `s5cmd`
 The `s5cmd/` folder contains `s5cmd.exe` (v2.3.0) and upstream documentation so Windows users do not need to install it separately. The downloader script points to this binary by default but accepts a custom path when required.
