@@ -4,7 +4,7 @@ Helpers for pulling down manageable slices of the Argoverse 2 LiDAR dataset and 
 
 ## Folder contents
 - `download_sample_logs.py` – Enumerates S3 log prefixes and syncs a limited count per split into `../argverse_data_preview`, forwarding concurrency/part-size tweaks to `s5cmd`.
-- `preview_lidar_gui.py` – Tkinter picker plus Open3D viewer for LiDAR sweep `.feather` files, with optional root/stride overrides.
+- `preview_lidar_gui.py` – Tkinter picker plus Open3D viewer for LiDAR sweep `.feather` files, with optional root/stride overrides and a pose picker to render sweeps in city coordinates.
 - `preview_city_pose_gui.py` – Table view of `city_SE3_egovehicle.feather` data with summary stats (duration, cadence, translation bounds).
 - `plot_pose_on_map.py` – Converts pose translations from city ENU to WGS84 via the published anchors and renders the trajectory on an OpenStreetMap basemap.
 - `export_pose_coordinates.py` – Streams every pose file from the Argoverse S3 bucket and appends the results to `av2_coor.feather`.
@@ -47,7 +47,7 @@ python download_sample_logs.py --split train --split val --count 25 --skip-exist
 The script streams the `s5cmd` output so you can keep an eye on progress and abort safely with Ctrl+C.
 
 ## Visualisation utilities
-- `preview_lidar_gui.py` opens a Tkinter list of `.feather` sweeps and renders the selected cloud in Open3D. Use `--root` to point at a custom folder and `--stride` to subsample points.
+- `preview_lidar_gui.py` opens a Tkinter list of `.feather` sweeps and renders the selected cloud in Open3D. Use `--root` to point at a custom folder and `--stride` to subsample points, or supply a log's `city_SE3_egovehicle.feather` via the pose picker to stack sweeps in city coordinates.
 - `preview_city_pose_gui.py` loads a `city_SE3_egovehicle.feather` file, summarises timestamps/translations, and shows up to 500 rows in a table. Launch it with `python preview_city_pose_gui.py --file <path>` or use the built-in file picker.
 - `plot_pose_on_map.py` converts pose translations to WGS84 using the published anchors and writes an interactive HTML map. Pass `--pose <path>` plus optional `--city`, `--output`, and `--no-open` flags.
 
@@ -59,6 +59,7 @@ The script streams the `s5cmd` output so you can keep an eye on progress and abo
 - `export_pose_coordinates.py` streams every `city_SE3_egovehicle.feather` from the public Argoverse bucket and writes a consolidated table to `av2_coor.feather`.
 - The exported dataset now resides at `ArgoverseLidar/av2_coor.feather` (~0.9 GB, ~6 M rows) and is ready for downstream analytics.
 - Each row represents a timestamped ego pose with both UTM and WGS84 projections derived via the city anchors.
+- Per-log pose files (`city_SE3_egovehicle.feather`) keep `timestamp_ns` aligned with a quaternion (`qw`, `qx`, `qy`, `qz`) and translation in metres (`tx_m`, `ty_m`, `tz_m`) for each sweep.
 
 Pose table columns:
 - `city`, `split`, `log_id` – Provenance of each measurement.
