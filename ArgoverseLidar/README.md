@@ -53,7 +53,11 @@ The script streams the `s5cmd` output so you can keep an eye on progress and abo
 
 ![preview_lidar_gui](https://github.com/user-attachments/assets/cf5133f1-fad5-4365-bfc4-10771765e25a)
 
+![Priview-lidar-log-level30s](https://github.com/user-attachments/assets/3f436bf7-b499-4ac9-9f04-338b0262c9ca)
+
+
 ![plot_pose_on_map](https://github.com/user-attachments/assets/77a94507-72cf-4aa3-9c1f-e7bd41d54a91)
+
 
 ## Pose coordinate export
 - `export_pose_coordinates.py` streams every `city_SE3_egovehicle.feather` from the public Argoverse bucket and writes a consolidated table to `av2_coor.feather`.
