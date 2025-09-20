@@ -7,3 +7,4 @@ argverse_data_preview/
 s5cmd/
 ArgoverseLidar/av2_coor.feather
 Argoverse2-geoalign/ATX
+ArgoverseLidar/av2_coor.parquet

@@ -392,7 +392,6 @@ class PreviewApp:
             messagebox.showerror("Invalid filename", str(exc))
             return
         try:
-            cloud = load_poin
             cloud = load_point_cloud(path, stride=stride)
         except Exception as exc:
             messagebox.showerror("Failed to open feather", f"{exc}")

@@ -7,14 +7,20 @@
         <script>
             L_NO_TOUCH = false;
             L_DISABLE_3D = false;
-        </script>
+        
+        
+            </script>
     
     <style>html, body {width: 100%;height: 100%;margin: 0;padding: 0;}</style>
     <style>#map {position:absolute;top:0;bottom:0;right:0;left:0;}</style>
-    <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.3/dist/leaflet.js"></script>
-    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.2/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/Leaflet.awesome-markers/2.0.2/leaflet.awesome-markers.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.3/dist/leaflet.js">
+            </script>
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js">
+            </script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.2/dist/js/bootstrap.bundle.min.js">
+            </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Leaflet.awesome-markers/2.0.2/leaflet.awesome-markers.js">
+            </script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.3/dist/leaflet.css"/>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.2/dist/css/bootstrap.min.css"/>
     <link rel="stylesheet" href="https://netdna.bootstrapcdn.com/bootstrap/3.0.0/css/bootstrap.min.css"/>
@@ -9392,5 +9398,476 @@
                 {"sticky": true}
             );
         
+
+            
+        // Austin imagery tile bounds overlay
+        var atxImageryTiles = [
+    {
+        "sub_tile_id": "3097424a1",
+        "west_lon": -97.8138818275,
+        "east_lon": -97.7954902587,
+        "south_lat": 30.2957217986,
+        "north_lat": 30.3136464451
+    },
+    {
+        "sub_tile_id": "3097424a2",
+        "west_lon": -97.7982598222,
+        "east_lon": -97.7798622259,
+        "south_lat": 30.2957195504,
+        "north_lat": 30.3136491378
+    },
+    {
+        "sub_tile_id": "3097424a3",
+        "west_lon": -97.8138808405,
+        "east_lon": -97.7954921038,
+        "south_lat": 30.2800972974,
+        "north_lat": 30.2980274249
+    },
+    {
+        "sub_tile_id": "3097424a4",
+        "west_lon": -97.7982581961,
+        "east_lon": -97.7798634319,
+        "south_lat": 30.2800949866,
+        "north_lat": 30.298030055
+    },
+    {
+        "sub_tile_id": "3097424b1",
+        "west_lon": -97.7826377446,
+        "east_lon": -97.7642341933,
+        "south_lat": 30.2957181466,
+        "north_lat": 30.3136499264
+    },
+    {
+        "sub_tile_id": "3097424b2",
+        "west_lon": -97.7670156669,
+        "east_lon": -97.7486091825,
+        "south_lat": 30.2957149022,
+        "north_lat": 30.3136543086
+    },
+    {
+        "sub_tile_id": "3097424b3",
+        "west_lon": -97.7826354794,
+        "east_lon": -97.7642347602,
+        "south_lat": 30.2800935196,
+        "north_lat": 30.2980307805
+    },
+    {
+        "sub_tile_id": "3097424b4",
+        "west_lon": -97.7670127627,
+        "east_lon": -97.7486091099,
+        "south_lat": 30.2800902115,
+        "north_lat": 30.2980350991
+    },
+    {
+        "sub_tile_id": "3097424c1",
+        "west_lon": -97.8138798538,
+        "east_lon": -97.7954909256,
+        "south_lat": 30.2644727494,
+        "north_lat": 30.2824029214
+    },
+    {
+        "sub_tile_id": "3097424c2",
+        "west_lon": -97.7982597372,
+        "east_lon": -97.779864783,
+        "south_lat": 30.2644704386,
+        "north_lat": 30.2824055516
+    },
+    {
+        "sub_tile_id": "3097424c3",
+        "west_lon": -97.8138821054,
+        "east_lon": -97.7954929146,
+        "south_lat": 30.2488455323,
+        "north_lat": 30.2667784959
+    },
+    {
+        "sub_tile_id": "3097424c4",
+        "west_lon": -97.7982581117,
+        "east_lon": -97.7798629669,
+        "south_lat": 30.2488458445,
+        "north_lat": 30.2667810011
+    },
+    {
+        "sub_tile_id": "3097424d1",
+        "west_lon": -97.7826363817,
+        "east_lon": -97.7642354733,
+        "south_lat": 30.2644689084,
+        "north_lat": 30.2824062143
+    },
+    {
+        "sub_tile_id": "3097424d2",
+        "west_lon": -97.7670130262,
+        "east_lon": -97.7486092581,
+        "south_lat": 30.2644655367,
+        "north_lat": 30.2824077209
+    },
+    {
+        "sub_tile_id": "3097424d3",
+        "west_lon": -97.7826373563,
+        "east_lon": -97.7642361861,
+        "south_lat": 30.2488415654,
+        "north_lat": 30.2667816639
+    },
+    {
+        "sub_tile_id": "3097424d4",
+        "west_lon": -97.7670132895,
+        "east_lon": -97.7486093327,
+        "south_lat": 30.2488408789,
+        "north_lat": 30.2667831073
+    },
+    {
+        "sub_tile_id": "3097433a1",
+        "west_lon": -97.7513934429,
+        "east_lon": -97.7329810771,
+        "south_lat": 30.2957151874,
+        "north_lat": 30.3136540378
+    },
+    {
+        "sub_tile_id": "3097433a2",
+        "west_lon": -97.7357681246,
+        "east_lon": -97.7173528238,
+        "south_lat": 30.2957108192,
+        "north_lat": 30.3136572963
+    },
+    {
+        "sub_tile_id": "3097433a3",
+        "west_lon": -97.7513931404,
+        "east_lon": -97.7329803654,
+        "south_lat": 30.2800876838,
+        "north_lat": 30.2980348281
+    },
+    {
+        "sub_tile_id": "3097433a4",
+        "west_lon": -97.7357702773,
+        "east_lon": -97.7173514731,
+        "south_lat": 30.2800859998,
+        "north_lat": 30.2980380867
+    },
+    {
+        "sub_tile_id": "3097433b1",
+        "west_lon": -97.7201458262,
+        "east_lon": -97.7017246454,
+        "south_lat": 30.295710044,
+        "north_lat": 30.3136559657
+    },
+    {
+        "sub_tile_id": "3097433b2",
+        "west_lon": -97.7045235276,
+        "east_lon": -97.6860899058,
+        "south_lat": 30.2957072335,
+        "north_lat": 30.3136609774
+    },
+    {
+        "sub_tile_id": "3097433b3",
+        "west_lon": -97.72014734,
+        "east_lon": -97.7017257486,
+        "south_lat": 30.2800852247,
+        "north_lat": 30.2980394407
+    },
+    {
+        "sub_tile_id": "3097433b4",
+        "west_lon": -97.7045244024,
+        "east_lon": -97.6860936137,
+        "south_lat": 30.2800824145,
+        "north_lat": 30.2980416389
+    },
+    {
+        "sub_tile_id": "3097433c1",
+        "west_lon": -97.7513927645,
+        "east_lon": -97.7329798021,
+        "south_lat": 30.2644629448,
+        "north_lat": 30.2824101352
+    },
+    {
+        "sub_tile_id": "3097433c2",
+        "west_lon": -97.7357692627,
+        "east_lon": -97.7173534391,
+        "south_lat": 30.264461261,
+        "north_lat": 30.2824133297
+    },
+    {
+        "sub_tile_id": "3097433c3",
+        "west_lon": -97.7513923888,
+        "east_lon": -97.7329792389,
+        "south_lat": 30.2488382229,
+        "north_lat": 30.2667854579
+    },
+    {
+        "sub_tile_id": "3097433c4",
+        "west_lon": -97.7357682483,
+        "east_lon": -97.7173522378,
+        "south_lat": 30.2488364745,
+        "north_lat": 30.2667885884
+    },
+    {
+        "sub_tile_id": "3097433d1",
+        "west_lon": -97.7201456865,
+        "east_lon": -97.7017239089,
+        "south_lat": 30.2644603562,
+        "north_lat": 30.2824146192
+    },
+    {
+        "sub_tile_id": "3097433d2",
+        "west_lon": -97.7045252769,
+        "east_lon": -97.6860911367,
+        "south_lat": 30.2644574805,
+        "north_lat": 30.2824168173
+    },
+    {
+        "sub_tile_id": "3097433d3",
+        "west_lon": -97.7201471998,
+        "east_lon": -97.7017252366,
+        "south_lat": 30.2488355697,
+        "north_lat": 30.2667898779
+    },
+    {
+        "sub_tile_id": "3097433d4",
+        "west_lon": -97.704522985,
+        "east_lon": -97.6860949939,
+        "south_lat": 30.2488326943,
+        "north_lat": 30.2667919464
+    },
+    {
+        "sub_tile_id": "3097502a1",
+        "west_lon": -97.8138811188,
+        "east_lon": -97.7954917366,
+        "south_lat": 30.2332210194,
+        "north_lat": 30.251154025
+    },
+    {
+        "sub_tile_id": "3097502a2",
+        "west_lon": -97.7982597245,
+        "east_lon": -97.7798643903,
+        "south_lat": 30.2332185828,
+        "north_lat": 30.2511537814
+    },
+    {
+        "sub_tile_id": "3097502a3",
+        "west_lon": -97.8138801326,
+        "east_lon": -97.7954906313,
+        "south_lat": 30.2175965259,
+        "north_lat": 30.2355268232
+    },
+    {
+        "sub_tile_id": "3097502a4",
+        "west_lon": -97.7982580995,
+        "east_lon": -97.7798657405,
+        "south_lat": 30.2175940893,
+        "north_lat": 30.2355292658
+    },
+    {
+        "sub_tile_id": "3097502b1",
+        "west_lon": -97.7826350923,
+        "east_lon": -97.7642368987,
+        "south_lat": 30.2332169894,
+        "north_lat": 30.2511570672
+    },
+    {
+        "sub_tile_id": "3097502b2",
+        "west_lon": -97.7670135528,
+        "east_lon": -97.7486094072,
+        "south_lat": 30.2332162392,
+        "north_lat": 30.2511585106
+    },
+    {
+        "sub_tile_id": "3097502b3",
+        "west_lon": -97.7826359942,
+        "east_lon": -97.7642376111,
+        "south_lat": 30.2175924327,
+        "north_lat": 30.2355325516
+    },
+    {
+        "sub_tile_id": "3097502b4",
+        "west_lon": -97.767013816,
+        "east_lon": -97.7486094817,
+        "south_lat": 30.2175916189,
+        "north_lat": 30.2355339318
+    },
+    {
+        "sub_tile_id": "3097502c1",
+        "west_lon": -97.8138791466,
+        "east_lon": -97.7954926193,
+        "south_lat": 30.2019721156,
+        "north_lat": 30.2199023894
+    },
+    {
+        "sub_tile_id": "3097502c2",
+        "west_lon": -97.798256475,
+        "east_lon": -97.7798639251,
+        "south_lat": 30.2019695532,
+        "north_lat": 30.2199047694
+    },
+    {
+        "sub_tile_id": "3097502c3",
+        "west_lon": -97.8138813252,
+        "east_lon": -97.7954914419,
+        "south_lat": 30.1863476642,
+        "north_lat": 30.2042780382
+    },
+    {
+        "sub_tile_id": "3097502c4",
+        "west_lon": -97.7982580151,
+        "east_lon": -97.779865275,
+        "south_lat": 30.1863451018,
+        "north_lat": 30.2042803559
+    },
+    {
+        "sub_tile_id": "3097502d1",
+        "west_lon": -97.7826368958,
+        "east_lon": -97.764235158,
+        "south_lat": 30.201967833,
+        "north_lat": 30.2199080552
+    },
+    {
+        "sub_tile_id": "3097502d2",
+        "west_lon": -97.7670141521,
+        "east_lon": -97.7486095562,
+        "south_lat": 30.2019642703,
+        "north_lat": 30.2199093722
+    },
+    {
+        "sub_tile_id": "3097502d3",
+        "west_lon": -97.782634633,
+        "east_lon": -97.7642359436,
+        "south_lat": 30.1863433185,
+        "north_lat": 30.2042807671
+    },
+    {
+        "sub_tile_id": "3097502d4",
+        "west_lon": -97.7670112509,
+        "east_lon": -97.7486096307,
+        "south_lat": 30.1863396921,
+        "north_lat": 30.2042847694
+    },
+    {
+        "sub_tile_id": "3097511a1",
+        "west_lon": -97.7513920131,
+        "east_lon": -97.7329818422,
+        "south_lat": 30.2332135834,
+        "north_lat": 30.2511607975
+    },
+    {
+        "sub_tile_id": "3097511a2",
+        "west_lon": -97.7357672343,
+        "east_lon": -97.717354203,
+        "south_lat": 30.2332117709,
+        "north_lat": 30.2511638639
+    },
+    {
+        "sub_tile_id": "3097511a3",
+        "west_lon": -97.7513916376,
+        "east_lon": -97.7329812789,
+        "south_lat": 30.217588899,
+        "north_lat": 30.2355361551
+    },
+    {
+        "sub_tile_id": "3097511a4",
+        "west_lon": -97.7357693858,
+        "east_lon": -97.7173530019,
+        "south_lat": 30.2175870219,
+        "north_lat": 30.2355392216
+    },
+    {
+        "sub_tile_id": "3097511b1",
+        "west_lon": -97.7201455469,
+        "east_lon": -97.7017265638,
+        "south_lat": 30.2332108014,
+        "north_lat": 30.2511650888
+    },
+    {
+        "sub_tile_id": "3097511b2",
+        "west_lon": -97.7045238595,
+        "east_lon": -97.6860925175,
+        "south_lat": 30.2332077955,
+        "north_lat": 30.2511671573
+    },
+    {
+        "sub_tile_id": "3097511b3",
+        "west_lon": -97.7201471341,
+        "east_lon": -97.701724725,
+        "south_lat": 30.2175832386,
+        "north_lat": 30.2355403823
+    },
+    {
+        "sub_tile_id": "3097511b4",
+        "west_lon": -97.7045247336,
+        "east_lon": -97.6860932076,
+        "south_lat": 30.2175829814,
+        "north_lat": 30.2355423862
+    },
+    {
+        "sub_tile_id": "3097511c1",
+        "west_lon": -97.7513912622,
+        "east_lon": -97.7329807157,
+        "south_lat": 30.2019642351,
+        "north_lat": 30.2199115319
+    },
+    {
+        "sub_tile_id": "3097511c2",
+        "west_lon": -97.7357683719,
+        "east_lon": -97.7173550408,
+        "south_lat": 30.201962358,
+        "north_lat": 30.2199117854
+    },
+    {
+        "sub_tile_id": "3097511c3",
+        "west_lon": -97.7513908869,
+        "east_lon": -97.7329801528,
+        "south_lat": 30.1863395928,
+        "north_lat": 30.2042869289
+    },
+    {
+        "sub_tile_id": "3097511c4",
+        "west_lon": -97.7357673583,
+        "east_lon": -97.71735384,
+        "south_lat": 30.1863376512,
+        "north_lat": 30.2042871184
+    },
+    {
+        "sub_tile_id": "3097511d1",
+        "west_lon": -97.7201454818,
+        "east_lon": -97.7017260519,
+        "south_lat": 30.2019585101,
+        "north_lat": 30.2199156304
+    },
+    {
+        "sub_tile_id": "3097511d2",
+        "west_lon": -97.7045224429,
+        "east_lon": -97.6860907323,
+        "south_lat": 30.2019581224,
+        "north_lat": 30.2199175693
+    },
+    {
+        "sub_tile_id": "3097511d3",
+        "west_lon": -97.7201469941,
+        "east_lon": -97.7017273783,
+        "south_lat": 30.1863338033,
+        "north_lat": 30.2042909634
+    },
+    {
+        "sub_tile_id": "3097511d4",
+        "west_lon": -97.704523317,
+        "east_lon": -97.6860945872,
+        "south_lat": 30.1863334159,
+        "north_lat": 30.2042928376
+    }
+];
+        var atxTileColor = '#0d6efd';
+        atxImageryTiles.forEach(function(tile) {
+            var bounds = [[tile.south_lat, tile.west_lon], [tile.north_lat, tile.east_lon]];
+            var rect = L.rectangle(bounds, {
+                color: atxTileColor,
+                weight: 2,
+                opacity: 0.9,
+                fill: false
+            }).addTo(map_eab1f2c7d111798a17b34787c7206138);
+            rect.bindTooltip(
+                `<div>${tile.sub_tile_id}</div>`,
+                {permanent: true, direction: 'center', className: 'atx-imagery-label'}
+            );
+        });
+
+        var style = document.createElement('style');
+        style.textContent = '.atx-imagery-label { background: rgba(255, 255, 255, 0.85); border-radius: 4px; padding: 2px 4px; color: #0c4a99; font-weight: 600; font-size: 11px; border: 1px solid rgba(13,110,253,0.6); box-shadow: 0 0 2px rgba(0,0,0,0.2); }';
+        document.head.appendChild(style);
 </script>
 </html>
