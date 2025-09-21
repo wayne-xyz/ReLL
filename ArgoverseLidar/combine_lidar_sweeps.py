@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import argparse
 import json
+from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.dataset as ds
 import pyarrow.feather as feather
 import pyarrow.parquet as pq
+from pyproj import Transformer
 
 
 class SE3:
@@ -78,10 +82,10 @@ def compose(a: SE3, b: SE3) -> SE3:
 def load_pose_map(path: Path) -> Dict[int, SE3]:
     table = feather.read_table(path)
     cols = table.to_pydict()
-    result: Dict[int, SE3] = {}
     tx_col = cols.get("tx_m", cols.get("tx"))
     ty_col = cols.get("ty_m", cols.get("ty"))
     tz_col = cols.get("tz_m", cols.get("tz"))
+    result: Dict[int, SE3] = {}
     for ts, qw, qx, qy, qz, tx, ty, tz in zip(
         cols["timestamp_ns"], cols["qw"], cols["qx"], cols["qy"], cols["qz"], tx_col, ty_col, tz_col
     ):
@@ -124,11 +128,74 @@ def read_lidar_feather(path: Path) -> Dict[str, np.ndarray]:
     }
 
 
+def lon_to_utm_zone(lon: float) -> int:
+    return int((lon + 180) / 6) + 1
+
+
+def latlon_to_utm(lat: float, lon: float) -> Tuple[str, float, float]:
+    zone = lon_to_utm_zone(lon)
+    hemisphere = "N" if lat >= 0 else "S"
+    epsg = 32600 + zone if hemisphere == "N" else 32700 + zone
+    transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
+    easting, northing = transformer.transform(lon, lat)
+    return f"{zone}{hemisphere}", float(easting), float(northing)
+
+
+def load_city_annotation(log_dir: Path) -> str:
+    map_dir = log_dir / "map"
+    if not map_dir.exists():
+        return ""
+    for json_file in map_dir.glob("*.json"):
+        stem = json_file.stem
+        parts = stem.split("__")
+        if len(parts) >= 3:
+            city_part = parts[-1]
+            if city_part:
+                return city_part
+    return ""
+
+
+    zone = lon_to_utm_zone(lon)
+    hemisphere = "N" if lat >= 0 else "S"
+    epsg = 32600 + zone if hemisphere == "N" else 32700 + zone
+    transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
+    easting, northing = transformer.transform(lon, lat)
+    return f"{zone}{hemisphere}", float(easting), float(northing)
+
+
+@lru_cache(maxsize=1)
+def _load_pose_coordinate_dataset(dataset_dir: Path) -> ds.Dataset:
+    return ds.dataset(str(dataset_dir), format="parquet")
+
+
+def lookup_lat_lon(dataset_dir: Path, log_id: str, timestamps: Iterable[int]) -> Dict[int, Tuple[float, float]]:
+    parquet_path = dataset_dir / "av2_coor.parquet"
+    feather_path = dataset_dir / "av2_coor.feather"
+    ts_list = list(int(ts) for ts in timestamps)
+    if parquet_path.exists():
+        dataset = _load_pose_coordinate_dataset(parquet_path)
+        table = dataset.to_table(filter=(pc.field("log_id") == log_id) & pc.field("timestamp_ns").isin(pa.array(ts_list, type=pa.int64())))
+    elif feather_path.exists():
+        table = feather.read_table(feather_path, columns=["log_id", "timestamp_ns", "latitude", "longitude"])
+        mask = (table["log_id"].to_numpy(zero_copy_only=False) == log_id)
+        table = table.filter(mask)
+        idx = pc.match(table["timestamp_ns"], pa.array(ts_list, type=pa.int64()))
+        mask = idx != -1
+        table = table.filter(mask)
+    else:
+        return {}
+    lat = table["latitude"].to_numpy(zero_copy_only=False).astype(np.float64)
+    lon = table["longitude"].to_numpy(zero_copy_only=False).astype(np.float64)
+    ts = table["timestamp_ns"].to_numpy(zero_copy_only=False).astype(np.int64)
+    return {int(t): (float(la), float(lo)) for t, la, lo in zip(ts, lat, lon)}
+
+
 def create_macro_sweep(
     log_dir: Path,
     sweep_indices: Sequence[int],
     center_index: int,
     output_prefix: Path,
+    dataset_dir: Path,
     compression: str = "zstd",
 ) -> Tuple[Path, Path]:
     lidar_dir = log_dir / "sensors" / "lidar"
@@ -215,6 +282,42 @@ def create_macro_sweep(
     ref_translation = reference_transform.translation
     ref_quat = matrix_to_quaternion(ref_rotation)
 
+    latlon_lookup = lookup_lat_lon(dataset_dir, log_dir.name, timestamps)
+    latlon_list = [latlon_lookup.get(ts) for ts in timestamps]
+    center_latlon = latlon_lookup.get(timestamps[center_index])
+
+    if center_latlon is not None:
+        if len(center_latlon) >= 3:
+            center_lat, center_lon, center_city_code = center_latlon
+        else:
+            center_lat, center_lon = center_latlon
+            center_city_code = ""
+        center_zone, center_easting, center_northing = latlon_to_utm(center_lat, center_lon)
+        center_city_name = center_city_code or ""
+    else:
+        center_lat = center_lon = float("nan")
+        center_zone = ""
+        center_easting = center_northing = float("nan")
+        center_city_name = ""
+
+    positions_latlon = []
+    positions_utm = []
+    for item in latlon_list:
+        if item is None:
+            positions_latlon.append(None)
+            positions_utm.append(None)
+        else:
+            if len(item) >= 3:
+                lat, lon, _ = item
+            else:
+                lat, lon = item
+            zone, easting, northing = latlon_to_utm(lat, lon)
+            positions_latlon.append([lat, lon])
+            positions_utm.append([zone, easting, northing])
+
+    if not center_city_name:
+        center_city_name = load_city_annotation(log_dir)
+
     metadata_table = pa.Table.from_pydict({
         "log_id": pa.array([log_dir.name]),
         "point_file": pa.array([point_path.name]),
@@ -226,6 +329,12 @@ def create_macro_sweep(
         "center_city_qx": pa.array([ref_quat[1]], type=pa.float64()),
         "center_city_qy": pa.array([ref_quat[2]], type=pa.float64()),
         "center_city_qz": pa.array([ref_quat[3]], type=pa.float64()),
+        "center_latitude_deg": pa.array([center_lat], type=pa.float64()),
+        "center_longitude_deg": pa.array([center_lon], type=pa.float64()),
+        "center_utm_zone": pa.array([center_zone]),
+        "center_utm_easting_m": pa.array([center_easting], type=pa.float64()),
+        "center_utm_northing_m": pa.array([center_northing], type=pa.float64()),
+        "city_name": pa.array([center_city_name]),
         "point_count": pa.array([all_points.shape[0]], type=pa.int64()),
         "sweep_count": pa.array([len(timestamps)], type=pa.int32()),
         "duration_ns": pa.array([int(timestamps[-1] - timestamps[0])], type=pa.int64()),
@@ -243,6 +352,8 @@ def create_macro_sweep(
         "sensor_motion_length_m": pa.array([motion_length], type=pa.float64()),
         "sensor_displacement_m": pa.array([displacement], type=pa.float64()),
         "sensor_positions_city_m": pa.array([json.dumps(translations.tolist())]),
+        "sensor_positions_latlon_deg": pa.array([json.dumps(positions_latlon)]),
+        "sensor_positions_utm": pa.array([json.dumps(positions_utm)]),
     })
 
     meta_path = output_prefix.with_name(output_prefix.name + "_meta").with_suffix(".parquet")
@@ -275,6 +386,12 @@ def main() -> None:
         type=Path,
         default=default_output_dir,
         help=f"Directory to store output parquet files (default: {default_output_dir})",
+    )
+    parser.add_argument(
+        "--dataset-dir",
+        type=Path,
+        default=default_output_dir,
+        help=f"Directory containing av2_coor.parquet or av2_coor.feather (default: {default_output_dir})",
     )
     parser.add_argument(
         "--compression",
@@ -311,11 +428,14 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_prefix = output_dir / prefix_name
 
+    dataset_dir = args.dataset_dir.resolve()
+
     point_path, meta_path = create_macro_sweep(
         log_dir=log_dir,
         sweep_indices=indices,
         center_index=center_index,
         output_prefix=output_prefix,
+        dataset_dir=dataset_dir,
         compression=args.compression,
     )
 
