@@ -1,4 +1,6 @@
-"""Rasterize a LiDAR macro-sweep parquet into UTM-aligned GeoTIFF bands."""
+﻿"""Rasterize a LiDAR macro-sweep parquet into UTM-aligned GeoTIFF bands."""
+from __future__ import annotations
+
 import json
 from pathlib import Path
 from typing import Tuple
@@ -8,7 +10,6 @@ import pyarrow.parquet as pq
 import rasterio
 from rasterio.transform import from_origin
 from pyproj import CRS
-
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_SAMPLE_DIR = BASE_DIR / "Data-Sample"
@@ -41,8 +42,8 @@ def utm_zone_to_crs(zone: str) -> CRS:
     return CRS.from_epsg(epsg)
 
 
-def load_metadata() -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, CRS]:
-    table = pq.read_table(META_PATH)
+def load_metadata(points_path: Path, meta_path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, CRS]:
+    table = pq.read_table(meta_path)
     meta = table.to_pydict()
     translation = np.array([
         meta["center_city_tx_m"][0],
@@ -82,8 +83,8 @@ def load_metadata() -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, CRS
     return translation, quat, A, city_xy, crs
 
 
-def load_points() -> Tuple[np.ndarray, np.ndarray]:
-    table = pq.read_table(POINTS_PATH, columns=["x", "y", "z", "intensity"])
+def load_points(points_path: Path) -> Tuple[np.ndarray, np.ndarray]:
+    table = pq.read_table(points_path, columns=["x", "y", "z", "intensity"])
     cols = {name: table[name].to_numpy(zero_copy_only=False) for name in ["x", "y", "z", "intensity"]}
     points = np.column_stack([
         cols["x"].astype(np.float64),
@@ -103,7 +104,7 @@ def project_to_utm(points_ref: np.ndarray, translation: np.ndarray, quat: np.nda
     return utm_xy[:, 0], utm_xy[:, 1], points_city[:, 2]
 
 
-def rasterize(easting: np.ndarray, northing: np.ndarray, height: np.ndarray, intensity: np.ndarray, crs: CRS) -> None:
+def rasterize(easting: np.ndarray, northing: np.ndarray, height: np.ndarray, intensity: np.ndarray, crs: CRS, output_tif: Path) -> None:
     min_e = float(easting.min() - BUFFER_METERS)
     max_e = float(easting.max() + BUFFER_METERS)
     min_n = float(northing.min() - BUFFER_METERS)
@@ -143,9 +144,9 @@ def rasterize(easting: np.ndarray, northing: np.ndarray, height: np.ndarray, int
     mask_grid = mask_raster.reshape((height_px, width))
 
     transform = from_origin(min_e, max_n, GRID_RESOLUTION, GRID_RESOLUTION)
-    OUTPUT_TIF.parent.mkdir(parents=True, exist_ok=True)
+    output_tif.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(
-        OUTPUT_TIF,
+        output_tif,
         "w",
         driver="GTiff",
         height=height_px,
@@ -162,11 +163,16 @@ def rasterize(easting: np.ndarray, northing: np.ndarray, height: np.ndarray, int
         dst.write_mask(mask_grid)
 
 
-def main() -> None:
-    translation, quat, A, _city_xy, crs = load_metadata()
-    points_ref, intensity = load_points()
+def rasterize_macro_sweep(points_path: Path, meta_path: Path, output_tif: Path) -> Path:
+    translation, quat, A, _city_xy, crs = load_metadata(points_path, meta_path)
+    points_ref, intensity = load_points(points_path)
     easting, northing, height = project_to_utm(points_ref, translation, quat, A)
-    rasterize(easting, northing, height, intensity, crs)
+    rasterize(easting, northing, height, intensity, crs, output_tif)
+    return output_tif
+
+
+def main() -> None:
+    rasterize_macro_sweep(POINTS_PATH, META_PATH, OUTPUT_TIF)
     print(f"Saved raster to {OUTPUT_TIF}")
 
 

@@ -9,3 +9,8 @@ ArgoverseLidar/av2_coor.feather
 Argoverse2-geoalign/ATX
 ArgoverseLidar/av2_coor.parquet
 Data-Sample/
+Data_pipeline/__pycache__
+paper/__pycache__/
+Data_sample_helper/__pycache__
+paper/
+data2/

@@ -3,18 +3,85 @@ from __future__ import annotations
 
 import argparse
 import json
-from functools import lru_cache
+from enum import Enum, unique
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pyarrow as pa
-import pyarrow.compute as pc
-import pyarrow.dataset as ds
 import pyarrow.feather as feather
 import pyarrow.parquet as pq
-from pyproj import Transformer
+from pyproj import Proj, Transformer
 
+
+
+
+@unique
+class CityName(str, Enum):
+    ATX = "ATX"
+    DTW = "DTW"
+    MIA = "MIA"
+    PAO = "PAO"
+    PIT = "PIT"
+    WDC = "WDC"
+
+
+UTM_ZONE_MAP: Dict[CityName, int] = {
+    CityName.ATX: 14,
+    CityName.DTW: 17,
+    CityName.MIA: 17,
+    CityName.PAO: 10,
+    CityName.PIT: 17,
+    CityName.WDC: 18,
+}
+
+def load_city_annotation(log_dir: Path) -> str:
+    map_dir = log_dir / "map"
+    if not map_dir.exists():
+        raise ValueError("Map directory missing; cannot infer city")
+    for json_file in map_dir.glob("*.json"):
+        stem = json_file.stem
+        parts = stem.split("__")
+        if len(parts) >= 3:
+            city_part = parts[-1]
+            if city_part:
+                return city_part
+    raise ValueError("City annotation not found in map metadata")
+
+
+
+def parse_city_enum(city_tag: str) -> CityName:
+    if not city_tag:
+        raise ValueError("City annotation missing; ensure map metadata is available")
+    token = city_tag.split("_")[0].upper()
+    try:
+        return CityName[token]
+    except KeyError as exc:
+        raise ValueError(f"Unrecognised city tag {city_tag!r}") from exc
+
+def get_city_reference(city: CityName) -> tuple[str, np.ndarray, Transformer]:
+    zone = UTM_ZONE_MAP[city]
+    utm_epsg = 32600 + zone
+    origin_lat, origin_lon = CITY_ORIGIN_LATLONG_DICT[city]
+    to_utm = Transformer.from_crs("EPSG:4326", f"EPSG:{utm_epsg}", always_xy=True)
+    origin_e, origin_n = to_utm.transform(origin_lon, origin_lat)
+    offset = np.array([origin_e, origin_n], dtype=np.float64)
+    to_wgs = Transformer.from_crs(f"EPSG:{utm_epsg}", "EPSG:4326", always_xy=True)
+    return f"{zone}N", offset, to_wgs
+
+def city_xy_to_utm(city_xy: np.ndarray, city: CityName) -> tuple[np.ndarray, str, Transformer]:
+    zone_str, offset, to_wgs = get_city_reference(city)
+    utm_xy = city_xy.astype(np.float64) + offset
+    return utm_xy, zone_str, to_wgs
+
+CITY_ORIGIN_LATLONG_DICT: Dict[CityName, Tuple[float, float]] = {
+    CityName.ATX: (30.27464237939507, -97.7404457407424),
+    CityName.DTW: (42.29993066912924, -83.17555750783717),
+    CityName.MIA: (25.77452579915163, -80.19656914449405),
+    CityName.PAO: (37.416065, -122.13571963362166),
+    CityName.PIT: (40.44177902989321, -80.01294377242584),
+    CityName.WDC: (38.889377, -77.0355047439081),
+}
 
 class SE3:
     def __init__(self, *, rotation: np.ndarray, translation: np.ndarray) -> None:
@@ -128,76 +195,16 @@ def read_lidar_feather(path: Path) -> Dict[str, np.ndarray]:
     }
 
 
-def lon_to_utm_zone(lon: float) -> int:
-    return int((lon + 180) / 6) + 1
-
-
-def latlon_to_utm(lat: float, lon: float) -> Tuple[str, float, float]:
-    zone = lon_to_utm_zone(lon)
-    hemisphere = "N" if lat >= 0 else "S"
-    epsg = 32600 + zone if hemisphere == "N" else 32700 + zone
-    transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
-    easting, northing = transformer.transform(lon, lat)
-    return f"{zone}{hemisphere}", float(easting), float(northing)
-
-
-def load_city_annotation(log_dir: Path) -> str:
-    map_dir = log_dir / "map"
-    if not map_dir.exists():
-        return ""
-    for json_file in map_dir.glob("*.json"):
-        stem = json_file.stem
-        parts = stem.split("__")
-        if len(parts) >= 3:
-            city_part = parts[-1]
-            if city_part:
-                return city_part
-    return ""
-
-
-    zone = lon_to_utm_zone(lon)
-    hemisphere = "N" if lat >= 0 else "S"
-    epsg = 32600 + zone if hemisphere == "N" else 32700 + zone
-    transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
-    easting, northing = transformer.transform(lon, lat)
-    return f"{zone}{hemisphere}", float(easting), float(northing)
-
-
-@lru_cache(maxsize=1)
-def _load_pose_coordinate_dataset(dataset_dir: Path) -> ds.Dataset:
-    return ds.dataset(str(dataset_dir), format="parquet")
-
-
-def lookup_lat_lon(dataset_dir: Path, log_id: str, timestamps: Iterable[int]) -> Dict[int, Tuple[float, float]]:
-    parquet_path = dataset_dir / "av2_coor.parquet"
-    feather_path = dataset_dir / "av2_coor.feather"
-    ts_list = list(int(ts) for ts in timestamps)
-    if parquet_path.exists():
-        dataset = _load_pose_coordinate_dataset(parquet_path)
-        table = dataset.to_table(filter=(pc.field("log_id") == log_id) & pc.field("timestamp_ns").isin(pa.array(ts_list, type=pa.int64())))
-    elif feather_path.exists():
-        table = feather.read_table(feather_path, columns=["log_id", "timestamp_ns", "latitude", "longitude"])
-        mask = (table["log_id"].to_numpy(zero_copy_only=False) == log_id)
-        table = table.filter(mask)
-        idx = pc.match(table["timestamp_ns"], pa.array(ts_list, type=pa.int64()))
-        mask = idx != -1
-        table = table.filter(mask)
-    else:
-        return {}
-    lat = table["latitude"].to_numpy(zero_copy_only=False).astype(np.float64)
-    lon = table["longitude"].to_numpy(zero_copy_only=False).astype(np.float64)
-    ts = table["timestamp_ns"].to_numpy(zero_copy_only=False).astype(np.int64)
-    return {int(t): (float(la), float(lo)) for t, la, lo in zip(ts, lat, lon)}
-
 
 def create_macro_sweep(
     log_dir: Path,
     sweep_indices: Sequence[int],
     center_index: int,
     output_prefix: Path,
-    dataset_dir: Path,
+    dataset_dir: Optional[Path] = None,
     compression: str = "zstd",
 ) -> Tuple[Path, Path]:
+    _ = dataset_dir  # retained for backwards compatibility
     lidar_dir = log_dir / "sensors" / "lidar"
     feather_files = sorted(lidar_dir.glob("*.feather"))
     pose_path = log_dir / "city_SE3_egovehicle.feather"
@@ -282,41 +289,19 @@ def create_macro_sweep(
     ref_translation = reference_transform.translation
     ref_quat = matrix_to_quaternion(ref_rotation)
 
-    latlon_lookup = lookup_lat_lon(dataset_dir, log_dir.name, timestamps)
-    latlon_list = [latlon_lookup.get(ts) for ts in timestamps]
-    center_latlon = latlon_lookup.get(timestamps[center_index])
+    city_tag = load_city_annotation(log_dir)
+    city_enum = parse_city_enum(city_tag)
+    utm_xy, utm_zone, utm_to_wgs = city_xy_to_utm(translations[:, :2], city_enum)
+    lon_vals, lat_vals = utm_to_wgs.transform(utm_xy[:, 0], utm_xy[:, 1])
+    positions_latlon = [[float(lat), float(lon)] for lat, lon in zip(lat_vals, lon_vals)]
+    positions_utm = [[utm_zone, float(easting), float(northing)] for easting, northing in utm_xy]
 
-    if center_latlon is not None:
-        if len(center_latlon) >= 3:
-            center_lat, center_lon, center_city_code = center_latlon
-        else:
-            center_lat, center_lon = center_latlon
-            center_city_code = ""
-        center_zone, center_easting, center_northing = latlon_to_utm(center_lat, center_lon)
-        center_city_name = center_city_code or ""
-    else:
-        center_lat = center_lon = float("nan")
-        center_zone = ""
-        center_easting = center_northing = float("nan")
-        center_city_name = ""
-
-    positions_latlon = []
-    positions_utm = []
-    for item in latlon_list:
-        if item is None:
-            positions_latlon.append(None)
-            positions_utm.append(None)
-        else:
-            if len(item) >= 3:
-                lat, lon, _ = item
-            else:
-                lat, lon = item
-            zone, easting, northing = latlon_to_utm(lat, lon)
-            positions_latlon.append([lat, lon])
-            positions_utm.append([zone, easting, northing])
-
-    if not center_city_name:
-        center_city_name = load_city_annotation(log_dir)
+    center_lat = float(lat_vals[center_index])
+    center_lon = float(lon_vals[center_index])
+    center_easting = float(utm_xy[center_index, 0])
+    center_northing = float(utm_xy[center_index, 1])
+    center_zone = utm_zone
+    center_city_name = city_tag or city_enum.value
 
     metadata_table = pa.Table.from_pydict({
         "log_id": pa.array([log_dir.name]),
