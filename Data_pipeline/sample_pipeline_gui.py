@@ -49,13 +49,7 @@ DEFAULT_SWEEP_COUNT = 5
 DEFAULT_BUFFER_METERS = 2.0
 DEFAULT_GRID_RESOLUTION = 0.3
 DEFAULT_SAMPLE_PREFIX = "combined_0p5s"
-
-
-DEFAULT_SWEEP_COUNT = 5
-DEFAULT_BUFFER_METERS = 2.0
-DEFAULT_GRID_RESOLUTION = 0.3
-DEFAULT_SAMPLE_PREFIX = "combined_0p5s"
-
+DEFAULT_CROP_MIN = 32.0
 
 @unique
 class CityName(str, Enum):
@@ -158,7 +152,7 @@ def load_city_transform(meta_path: Path) -> Tuple[np.ndarray, np.ndarray, np.nda
     return translation, quat, offset_xy, zone, target_crs
 
 
-def compute_utm_bounds(points_path: Path, translation: np.ndarray, quat: np.ndarray, offset_xy: np.ndarray, buffer_m: float) -> Tuple[float, float, float, float]:
+def compute_utm_bounds(points_path: Path, translation: np.ndarray, quat: np.ndarray, offset_xy: np.ndarray, buffer_m: float, crop_square_m: float | None = None) -> Tuple[float, float, float, float]:
     points_table = pq.read_table(points_path, columns=["x", "y", "z"])
     points = np.column_stack([
         points_table["x"].to_numpy(zero_copy_only=False).astype(np.float64),
@@ -168,10 +162,20 @@ def compute_utm_bounds(points_path: Path, translation: np.ndarray, quat: np.ndar
     rotation = quaternion_to_matrix(*quat)
     city_points = (rotation @ points.T).T + translation
     utm_xy = city_points[:, :2] + offset_xy
-    min_e = float(utm_xy[:, 0].min() - buffer_m)
-    max_e = float(utm_xy[:, 0].max() + buffer_m)
-    min_n = float(utm_xy[:, 1].min() - buffer_m)
-    max_n = float(utm_xy[:, 1].max() + buffer_m)
+
+    if crop_square_m is not None:
+        half = float(crop_square_m) / 2.0
+        center_e = float(translation[0] + offset_xy[0])
+        center_n = float(translation[1] + offset_xy[1])
+        min_e = center_e - half
+        max_e = center_e + half
+        min_n = center_n - half
+        max_n = center_n + half
+    else:
+        min_e = float(utm_xy[:, 0].min() - buffer_m)
+        max_e = float(utm_xy[:, 0].max() + buffer_m)
+        min_n = float(utm_xy[:, 1].min() - buffer_m)
+        max_n = float(utm_xy[:, 1].max() + buffer_m)
     return min_e, max_e, min_n, max_n
 
 
@@ -296,10 +300,29 @@ def build_dsm(bounds: Tuple[float, float, float, float], tiles_df: pd.DataFrame,
         out_las.write(output_laz.with_suffix(".las"))
 
 
-def run_stage_two(points_path: Path, meta_path: Path, city_root: Path, output_dir: Path, buffer_m: float, target_res: float, base_name: str) -> Tuple[Path, Path]:
+def run_stage_two(points_path: Path, meta_path: Path, city_root: Path, output_dir: Path, buffer_m: float, target_res: float, base_name: str, crop_square_m: float | None = None) -> Tuple[Path, Path]:
     imagery_dir = city_root / "Imagery"
     dsm_dir = city_root / "DSM"
     bounds_csv = city_root / "imagery_tile_bounds.csv"
+
+    if not imagery_dir.exists():
+        raise FileNotFoundError(f"Imagery directory not found: {imagery_dir}")
+    if not dsm_dir.exists():
+        raise FileNotFoundError(f"DSM directory not found: {dsm_dir}")
+    if not bounds_csv.exists():
+        raise FileNotFoundError(f"Tile bounds CSV not found: {bounds_csv}")
+
+    translation, quat, offset_xy, _zone, target_crs = load_city_transform(meta_path)
+    effective_buffer = 0.0 if crop_square_m is not None else buffer_m
+    bounds = compute_utm_bounds(points_path, translation, quat, offset_xy, effective_buffer, crop_square_m=crop_square_m)
+    tiles_df = select_imagery_tiles(bounds, bounds_csv, target_crs)
+
+    tif_path = output_dir / f"{base_name}_imagery_utm.tif"
+    laz_path = output_dir / f"{base_name}_dsm_utm.laz"
+
+    build_imagery(bounds, tiles_df, imagery_dir, target_crs, target_res, tif_path)
+    build_dsm(bounds, tiles_df, dsm_dir, target_crs, laz_path)
+    return tif_path, laz_path
 
     if not imagery_dir.exists():
         raise FileNotFoundError(f"Imagery directory not found: {imagery_dir}")
@@ -334,6 +357,9 @@ class SampleBuilderApp:
         self.output_dir_var = tk.StringVar(value=str(THIS_DIR.parent / "Data-Sample"))
         self.sample_prefix_var = tk.StringVar(value=DEFAULT_SAMPLE_PREFIX)
         self.sweep_count_var = tk.StringVar(value=str(DEFAULT_SWEEP_COUNT))
+        self.crop_enable_var = tk.BooleanVar(value=False)
+        self.crop_size_var = tk.StringVar(value=str(DEFAULT_CROP_MIN))
+        self.crop_entry: tk.Entry | None = None
 
         self._build_layout()
 
@@ -361,11 +387,29 @@ class SampleBuilderApp:
         tk.Label(row, text="Sweep count", anchor="w").pack(side=tk.LEFT)
         tk.Entry(row, width=5, textvariable=self.sweep_count_var).pack(side=tk.LEFT, padx=(0, 6))
 
+        crop_row = tk.Frame(frame)
+        crop_row.pack(fill=tk.X, pady=(0, 6))
+        chk = tk.Checkbutton(
+            crop_row,
+            text="Crop outputs to square (m)",
+            variable=self.crop_enable_var,
+            command=self._toggle_crop_entry,
+        )
+        chk.pack(side=tk.LEFT)
+        entry = tk.Entry(crop_row, width=8, textvariable=self.crop_size_var, state=tk.DISABLED)
+        entry.pack(side=tk.LEFT, padx=(6, 0))
+        self.crop_entry = entry
+
         self.run_button = tk.Button(frame, text="Run pipeline", command=self.run_pipeline)
         self.run_button.pack(pady=(10, 8))
 
         self.log_text = ScrolledText(frame, height=20, state=tk.DISABLED)
         self.log_text.pack(fill=tk.BOTH, expand=True)
+
+    def _toggle_crop_entry(self) -> None:
+        state = tk.NORMAL if self.crop_enable_var.get() else tk.DISABLED
+        if self.crop_entry is not None:
+            self.crop_entry.configure(state=state)
 
     def _browse_directory(self, var: tk.StringVar) -> None:
         path = filedialog.askdirectory(title="Select directory")
@@ -390,6 +434,17 @@ class SampleBuilderApp:
             messagebox.showerror("Invalid input", "Sweep count must be a positive integer")
             return
 
+        crop_size = None
+        if self.crop_enable_var.get():
+            try:
+                crop_size = float(self.crop_size_var.get())
+            except ValueError:
+                messagebox.showerror("Invalid input", "Crop size must be a number")
+                return
+            if crop_size < DEFAULT_CROP_MIN:
+                messagebox.showerror("Invalid input", f"Crop size must be at least {DEFAULT_CROP_MIN} m")
+                return
+
         log_dir = Path(self.log_dir_var.get()).resolve()
         city_root = Path(self.city_root_var.get()).resolve()
         output_dir = Path(self.output_dir_var.get()).resolve()
@@ -405,13 +460,15 @@ class SampleBuilderApp:
             return
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        params = (log_dir, city_root, output_dir, sweep_count, sample_prefix)
+        params = (log_dir, city_root, output_dir, sweep_count, sample_prefix, crop_size)
         self.run_button.configure(state=tk.DISABLED)
         self.log("Starting sample pipeline...")
+        if crop_size is not None:
+            self.log(f"Cropping outputs to {crop_size:.2f} m square (min {DEFAULT_CROP_MIN} m).")
         self.run_thread = threading.Thread(target=self._pipeline_worker, args=params, daemon=True)
         self.run_thread.start()
 
-    def _pipeline_worker(self, log_dir: Path, city_root: Path, output_dir: Path, sweep_count: int, sample_prefix: str) -> None:
+    def _pipeline_worker(self, log_dir: Path, city_root: Path, output_dir: Path, sweep_count: int, sample_prefix: str, crop_size: float | None) -> None:
         try:
             self.log(f"Stage 1: combining {sweep_count} LiDAR sweeps from {log_dir}")
             lidar_dir = log_dir / "sensors" / "lidar"
@@ -423,15 +480,24 @@ class SampleBuilderApp:
             center_index = len(sweep_indices) // 2
             output_prefix = output_dir / sample_prefix
 
-            point_path, meta_path = create_macro_sweep(
+            point_path, meta_path, applied_crop = create_macro_sweep(
                 log_dir=log_dir,
                 sweep_indices=sweep_indices,
                 center_index=center_index,
                 output_prefix=output_prefix,
                 dataset_dir=THIS_DIR,
+                crop_square_m=crop_size,
             )
             self.log(f"Generated point parquet: {point_path}")
             self.log(f"Generated metadata parquet: {meta_path}")
+            if crop_size is not None:
+                if applied_crop is not None and abs(applied_crop - crop_size) > 1e-6:
+                    self.log(f"Requested crop {crop_size:.2f} m adjusted to {applied_crop:.2f} m based on available coverage.")
+                elif applied_crop is None:
+                    self.log("Crop request skipped; proceeding with full extent.")
+                else:
+                    self.log(f"Applied crop size: {applied_crop:.2f} m.")
+            crop_for_stage2 = applied_crop if applied_crop is not None else None
 
             self.log("Stage 2: building aligned imagery and DSM")
             tif_path, laz_path = run_stage_two(
@@ -442,6 +508,7 @@ class SampleBuilderApp:
                 buffer_m=DEFAULT_BUFFER_METERS,
                 target_res=DEFAULT_GRID_RESOLUTION,
                 base_name=sample_prefix,
+                crop_square_m=crop_for_stage2,
             )
             self.log(f"Generated imagery GeoTIFF: {tif_path}")
             self.log(f"Generated DSM LAZ: {laz_path}")
