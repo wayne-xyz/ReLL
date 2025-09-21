@@ -37,12 +37,23 @@ def apply_affine(coeff: np.ndarray, pts_xy: np.ndarray) -> np.ndarray:
     return pts_xy @ coeff[:2] + coeff[2]
 
 
+def downsample_points(points: np.ndarray, sample_size: int | None) -> np.ndarray:
+    if sample_size is None or sample_size <= 0 or len(points) <= sample_size:
+        return points.astype(np.float64)
+    rng = np.random.default_rng(seed=42)
+    idx = rng.choice(len(points), size=sample_size, replace=False)
+    return points[idx].astype(np.float64)
+
+
 def infer_lidar_points(lidar_path: Path, meta_path: Path | None, sample_size: int | None) -> np.ndarray:
+    print(f"Loading LiDAR parquet: {lidar_path}")
     df = pd.read_parquet(lidar_path)
 
     if {"utm_e", "utm_n", "elevation"}.issubset(df.columns):
+        print("Detected utm_e/utm_n/elevation columns; treating LiDAR coordinates as UTM.")
         pts = df[["utm_e", "utm_n", "elevation"]].to_numpy()
     elif meta_path is not None:
+        print(f"Using metadata {meta_path} to convert LiDAR to UTM.")
         meta = pd.read_parquet(meta_path).iloc[0]
         rotation = quat_to_rot(meta["center_city_qw"], meta["center_city_qx"], meta["center_city_qy"], meta["center_city_qz"])
         translation = np.array([
@@ -62,18 +73,30 @@ def infer_lidar_points(lidar_path: Path, meta_path: Path | None, sample_size: in
         utm_n = apply_affine(coeff_n, xyz_city[:, :2])
         pts = np.column_stack([utm_e, utm_n, xyz_city[:, 2]])
     elif {"x", "y", "z"}.issubset(df.columns):
+        print("LiDAR lacks UTM columns and metadata; visualising raw x/y/z coordinates (likely sensor frame).")
         pts = df[["x", "y", "z"]].to_numpy()
     else:
-        raise ValueError("Unable to infer coordinate columns in LiDAR parquet; provide metadata or expected fields.")
+        raise ValueError("Unable to infer LiDAR coordinate columns; provide metadata or standard fields.")
 
-    return downsample_points(pts, sample_size)
+    pts = downsample_points(pts, sample_size)
+    if pts.size:
+        print(f"LiDAR sample size: {len(pts)} | min={pts.min(axis=0)}, max={pts.max(axis=0)}")
+    else:
+        print("LiDAR point set is empty after sampling.")
+    return pts
 
 
 def load_dsm_points(dsm_path: Path, bbox: tuple[np.ndarray, np.ndarray] | None, sample_size: int | None, margin: float) -> np.ndarray:
+    print(f"Loading DSM file: {dsm_path}")
     las = laspy.read(dsm_path)
     pts = np.column_stack([las.x, las.y, las.z])
+    if pts.size:
+        print(f"DSM extent full set | min={pts.min(axis=0)}, max={pts.max(axis=0)}")
+    else:
+        print("DSM file contained no points.")
 
-    if bbox is not None:
+    if bbox is not None and pts.size:
+        print(f"Clipping DSM to LiDAR XY bounds with {margin} m margin.")
         mins, maxs = bbox
         mins = mins.copy()
         maxs = maxs.copy()
@@ -85,15 +108,12 @@ def load_dsm_points(dsm_path: Path, bbox: tuple[np.ndarray, np.ndarray] | None, 
         )
         pts = pts[mask]
 
-    return downsample_points(pts, sample_size)
-
-
-def downsample_points(points: np.ndarray, sample_size: int | None) -> np.ndarray:
-    if sample_size is None or len(points) <= sample_size:
-        return points.astype(np.float64)
-    rng = np.random.default_rng(seed=42)
-    idx = rng.choice(len(points), size=sample_size, replace=False)
-    return points[idx].astype(np.float64)
+    pts = downsample_points(pts, sample_size)
+    if pts.size:
+        print(f"DSM sample size: {len(pts)} | min={pts.min(axis=0)}, max={pts.max(axis=0)}")
+    else:
+        print("DSM point set is empty after sampling.")
+    return pts
 
 
 def create_o3d_cloud(points: np.ndarray, color: tuple[float, float, float]) -> o3d.geometry.PointCloud:
@@ -143,16 +163,16 @@ def launch_gui():
 
     def run_view():
         try:
-            lidar = Path(path_vars["lidar"].get())
-            dsm = Path(path_vars["dsm"].get())
+            lidar_path = Path(path_vars["lidar"].get())
+            dsm_path = Path(path_vars["dsm"].get())
             meta_value = path_vars["meta"].get().strip()
-            meta = Path(meta_value) if meta_value else None
-            if not lidar.is_file() or not dsm.is_file():
+            meta_path = Path(meta_value) if meta_value else None
+            if not lidar_path.is_file() or not dsm_path.is_file():
                 raise FileNotFoundError("Select existing LiDAR parquet and DSM LAS/LAZ files.")
             lidar_sample = parse_optional_int(path_vars["lidar_sample"].get())
             dsm_sample = parse_optional_int(path_vars["dsm_sample"].get())
-            margin = float(path_vars["margin"].get())
-            run_viewer(lidar, meta, dsm, (lidar_sample, dsm_sample), margin)
+            margin_val = float(path_vars["margin"].get())
+            run_viewer(lidar_path, meta_path, dsm_path, (lidar_sample, dsm_sample), margin_val)
         except Exception as exc:  # pragma: no cover
             messagebox.showerror("Error", str(exc))
 
@@ -164,10 +184,8 @@ def launch_gui():
 
     for idx, (label, key, filetypes) in enumerate(rows):
         tk.Label(root, text=label).grid(row=idx, column=0, sticky="w", padx=6, pady=4)
-        entry = tk.Entry(root, textvariable=path_vars[key], width=60)
-        entry.grid(row=idx, column=1, padx=6, pady=4)
-        btn = tk.Button(root, text="Browse", command=lambda v=path_vars[key], ft=filetypes: browse_file(v, ft))
-        btn.grid(row=idx, column=2, padx=6, pady=4)
+        tk.Entry(root, textvariable=path_vars[key], width=60).grid(row=idx, column=1, padx=6, pady=4)
+        tk.Button(root, text="Browse", command=lambda v=path_vars[key], ft=filetypes: browse_file(v, ft)).grid(row=idx, column=2, padx=6, pady=4)
 
     tk.Label(root, text="LiDAR sample (blank = all)").grid(row=3, column=0, sticky="w", padx=6, pady=4)
     tk.Entry(root, textvariable=path_vars["lidar_sample"], width=15).grid(row=3, column=1, sticky="w", padx=6, pady=4)
@@ -179,7 +197,6 @@ def launch_gui():
     tk.Entry(root, textvariable=path_vars["margin"], width=15).grid(row=5, column=1, sticky="w", padx=6, pady=4)
 
     tk.Button(root, text="View", command=run_view).grid(row=6, column=0, columnspan=3, pady=12)
-
     root.mainloop()
 
 
@@ -189,7 +206,7 @@ def parse_optional_int(value: str) -> int | None:
         return None
     parsed = int(value)
     if parsed <= 0:
-        raise ValueError("Sample size must be positive if provided.")
+        return None
     return parsed
 
 
@@ -198,9 +215,9 @@ def parse_args():
     parser.add_argument("--lidar", type=Path, help="Path to LiDAR parquet file")
     parser.add_argument("--dsm", type=Path, help="Path to DSM LAS/LAZ file")
     parser.add_argument("--meta", type=Path, default=None, help="Optional metadata parquet for LiDAR frame conversion")
-    parser.add_argument("--lidar-sample", type=int, default=DEFAULT_LIDAR_SAMPLE, help="LiDAR random sample size (0 or negative for all)")
-    parser.add_argument("--dsm-sample", type=int, default=DEFAULT_DSM_SAMPLE, help="DSM random sample size (0 or negative for all)")
-    parser.add_argument("--margin", type=float, default=DEFAULT_MARGIN, help="Extra meters to include around LiDAR XY bounds")
+    parser.add_argument("--lidar-sample", type=int, default=DEFAULT_LIDAR_SAMPLE, help="LiDAR random sample size (<=0 for all)")
+    parser.add_argument("--dsm-sample", type=int, default=DEFAULT_DSM_SAMPLE, help="DSM random sample size (<=0 for all)")
+    parser.add_argument("--margin", type=float, default=DEFAULT_MARGIN, help="Extra metres to include around LiDAR XY bounds")
     parser.add_argument("--gui", action="store_true", help="Launch GUI file picker")
     return parser.parse_args()
 
