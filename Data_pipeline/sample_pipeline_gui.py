@@ -7,7 +7,7 @@ import sys
 import threading
 from enum import Enum, unique
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, NamedTuple, Tuple
 
 import importlib.util
 
@@ -300,7 +300,13 @@ def build_dsm(bounds: Tuple[float, float, float, float], tiles_df: pd.DataFrame,
         out_las.write(output_laz.with_suffix(".las"))
 
 
-def run_stage_two(points_path: Path, meta_path: Path, city_root: Path, output_dir: Path, buffer_m: float, target_res: float, base_name: str, crop_square_m: float | None = None) -> Tuple[Path, Path]:
+
+class StageTwoResult(NamedTuple):
+    tif_path: Path
+    laz_path: Path
+    utm_extent_xy: Tuple[float, float]
+
+def run_stage_two(points_path: Path, meta_path: Path, city_root: Path, output_dir: Path, buffer_m: float, target_res: float, base_name: str, crop_square_m: float | None = None) -> StageTwoResult:
     imagery_dir = city_root / "Imagery"
     dsm_dir = city_root / "DSM"
     bounds_csv = city_root / "imagery_tile_bounds.csv"
@@ -314,33 +320,25 @@ def run_stage_two(points_path: Path, meta_path: Path, city_root: Path, output_di
 
     translation, quat, offset_xy, _zone, target_crs = load_city_transform(meta_path)
     effective_buffer = 0.0 if crop_square_m is not None else buffer_m
-    bounds = compute_utm_bounds(points_path, translation, quat, offset_xy, effective_buffer, crop_square_m=crop_square_m)
+    bounds = compute_utm_bounds(
+        points_path, translation, quat, offset_xy, effective_buffer, crop_square_m=crop_square_m
+    )
     tiles_df = select_imagery_tiles(bounds, bounds_csv, target_crs)
 
     tif_path = output_dir / f"{base_name}_imagery_utm.tif"
     laz_path = output_dir / f"{base_name}_dsm_utm.laz"
 
-    build_imagery(bounds, tiles_df, imagery_dir, target_crs, target_res, tif_path)
-    build_dsm(bounds, tiles_df, dsm_dir, target_crs, laz_path)
-    return tif_path, laz_path
-
-    if not imagery_dir.exists():
-        raise FileNotFoundError(f"Imagery directory not found: {imagery_dir}")
-    if not dsm_dir.exists():
-        raise FileNotFoundError(f"DSM directory not found: {dsm_dir}")
-    if not bounds_csv.exists():
-        raise FileNotFoundError(f"Tile bounds CSV not found: {bounds_csv}")
-
-    translation, quat, offset_xy, _zone, target_crs = load_city_transform(meta_path)
-    bounds = compute_utm_bounds(points_path, translation, quat, offset_xy, buffer_m)
-    tiles_df = select_imagery_tiles(bounds, bounds_csv, target_crs)
-
-    tif_path = output_dir / f"{base_name}_imagery_utm.tif"
-    laz_path = output_dir / f"{base_name}_dsm_utm.laz"
+    width_m = float(bounds[1] - bounds[0])
+    height_m = float(bounds[3] - bounds[2])
 
     build_imagery(bounds, tiles_df, imagery_dir, target_crs, target_res, tif_path)
     build_dsm(bounds, tiles_df, dsm_dir, target_crs, laz_path)
-    return tif_path, laz_path
+
+    return StageTwoResult(
+        tif_path=tif_path,
+        laz_path=laz_path,
+        utm_extent_xy=(width_m, height_m),
+    )
 
 
 class SampleBuilderApp:
@@ -480,7 +478,7 @@ class SampleBuilderApp:
             center_index = len(sweep_indices) // 2
             output_prefix = output_dir / sample_prefix
 
-            point_path, meta_path, applied_crop = create_macro_sweep(
+            macro = create_macro_sweep(
                 log_dir=log_dir,
                 sweep_indices=sweep_indices,
                 center_index=center_index,
@@ -488,19 +486,34 @@ class SampleBuilderApp:
                 dataset_dir=THIS_DIR,
                 crop_square_m=crop_size,
             )
-            self.log(f"Generated point parquet: {point_path}")
+            point_path = macro.point_path
+            meta_path = macro.meta_path
+            utm_point_path = macro.utm_point_path
+            sensor_extent_x, sensor_extent_y = macro.sensor_extent_xy
+            utm_extent_x, utm_extent_y = macro.utm_extent_xy
+
+            self.log(f"Generated point parquet: {point_path} (sensor extent {sensor_extent_x:.2f} m x {sensor_extent_y:.2f} m)")
             self.log(f"Generated metadata parquet: {meta_path}")
+            self.log(f"Generated UTM point parquet: {utm_point_path} (utm extent {utm_extent_x:.2f} m x {utm_extent_y:.2f} m)")
             if crop_size is not None:
-                if applied_crop is not None and abs(applied_crop - crop_size) > 1e-6:
-                    self.log(f"Requested crop {crop_size:.2f} m adjusted to {applied_crop:.2f} m based on available coverage.")
-                elif applied_crop is None:
-                    self.log("Crop request skipped; proceeding with full extent.")
+                applied_crop_sensor = macro.applied_crop_sensor
+                applied_crop_utm = macro.applied_crop_utm
+                if applied_crop_sensor is not None and abs(applied_crop_sensor - crop_size) > 1e-6:
+                    self.log(f"Sensor-frame crop {crop_size:.2f} m adjusted to {applied_crop_sensor:.2f} m.")
+                elif applied_crop_sensor is None:
+                    self.log("Sensor-frame crop request skipped; using full extent.")
                 else:
-                    self.log(f"Applied crop size: {applied_crop:.2f} m.")
-            crop_for_stage2 = applied_crop if applied_crop is not None else None
+                    self.log(f"Applied sensor-frame crop: {applied_crop_sensor:.2f} m.")
+                if applied_crop_utm is not None and abs(applied_crop_utm - crop_size) > 1e-6:
+                    self.log(f"UTM crop {crop_size:.2f} m adjusted to {applied_crop_utm:.2f} m.")
+                elif applied_crop_utm is None:
+                    self.log("UTM crop request skipped; using full extent.")
+                else:
+                    self.log(f"Applied UTM crop: {applied_crop_utm:.2f} m.")
+            crop_for_stage2 = macro.applied_crop_sensor if macro.applied_crop_sensor is not None else None
 
             self.log("Stage 2: building aligned imagery and DSM")
-            tif_path, laz_path = run_stage_two(
+            stage_two = run_stage_two(
                 points_path=point_path,
                 meta_path=meta_path,
                 city_root=city_root,
@@ -510,8 +523,11 @@ class SampleBuilderApp:
                 base_name=sample_prefix,
                 crop_square_m=crop_for_stage2,
             )
-            self.log(f"Generated imagery GeoTIFF: {tif_path}")
-            self.log(f"Generated DSM LAZ: {laz_path}")
+            tif_path = stage_two.tif_path
+            laz_path = stage_two.laz_path
+            utm_width, utm_height = stage_two.utm_extent_xy
+            self.log(f"Generated imagery GeoTIFF: {tif_path} (footprint {utm_width:.2f} m x {utm_height:.2f} m)")
+            self.log(f"Generated DSM LAZ: {laz_path} (footprint {utm_width:.2f} m x {utm_height:.2f} m)")
             self.log("Pipeline completed successfully.")
             messagebox.showinfo("Done", f"Sample generated in {output_dir}")
         except Exception as exc:

@@ -5,15 +5,13 @@ import argparse
 import json
 from enum import Enum, unique
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.feather as feather
 import pyarrow.parquet as pq
-from pyproj import Proj, Transformer
-
-
+from pyproj import Transformer
 
 
 @unique
@@ -84,6 +82,16 @@ CITY_ORIGIN_LATLONG_DICT: Dict[CityName, Tuple[float, float]] = {
 }
 
 MIN_CROP_METERS = 32.0
+
+
+class MacroSweepResult(NamedTuple):
+    point_path: Path
+    meta_path: Path
+    utm_point_path: Path
+    applied_crop_sensor: Optional[float]
+    applied_crop_utm: Optional[float]
+    sensor_extent_xy: Tuple[float, float]
+    utm_extent_xy: Tuple[float, float]
 
 
 class SE3:
@@ -207,8 +215,15 @@ def create_macro_sweep(
     dataset_dir: Optional[Path] = None,
     compression: str = "zstd",
     crop_square_m: Optional[float] = None,
-) -> Tuple[Path, Path, Optional[float]]:
-    """Combine sweeps into a macro point cloud and optionally crop to a centred square."""
+) -> MacroSweepResult:
+    """Combine sweeps into sensor- and UTM-frame point clouds with optional crops.
+
+    Returns
+    -------
+    MacroSweepResult
+        File paths, applied crop sizes, and XY extents for the generated
+        point clouds.
+    """
     _ = dataset_dir  # retained for backwards compatibility
     lidar_dir = log_dir / "sensors" / "lidar"
     feather_files = sorted(lidar_dir.glob("*.feather"))
@@ -224,11 +239,11 @@ def create_macro_sweep(
     selected_files = [feather_files[i] for i in sweep_indices]
     timestamps = [int(f.stem) for f in selected_files]
 
-    city_from_sensor_list: List[SE3] = []
-    city_points_list: List[np.ndarray] = []
-    intensity_list: List[np.ndarray] = []
-    laser_list: List[np.ndarray] = []
-    offset_list: List[np.ndarray] = []
+    city_from_sensor_list: list[SE3] = []
+    city_points_list: list[np.ndarray] = []
+    intensity_list: list[np.ndarray] = []
+    laser_list: list[np.ndarray] = []
+    offset_list: list[np.ndarray] = []
 
     for file_path, ts in zip(selected_files, timestamps):
         if ts not in poses:
@@ -252,10 +267,13 @@ def create_macro_sweep(
 
     reference_transform = city_from_sensor_list[center_index]
     sensor_from_city = reference_transform.inverse()
+    ref_rotation = reference_transform.rotation
+    ref_translation = reference_transform.translation
+    ref_quat = matrix_to_quaternion(ref_rotation)
 
-    aligned_points: List[np.ndarray] = []
-    source_indices: List[np.ndarray] = []
-    source_timestamps: List[np.ndarray] = []
+    aligned_points: list[np.ndarray] = []
+    source_indices: list[np.ndarray] = []
+    source_timestamps: list[np.ndarray] = []
 
     for idx, (pts_city, ts) in enumerate(zip(city_points_list, timestamps)):
         pts_ref = sensor_from_city.transform_points(pts_city.astype(np.float64)).astype(np.float32)
@@ -264,87 +282,136 @@ def create_macro_sweep(
         source_indices.append(np.full(count, idx, dtype=np.int8))
         source_timestamps.append(np.full(count, ts, dtype=np.int64))
 
-    all_points = np.concatenate(aligned_points, axis=0)
-    all_intensity = np.concatenate(intensity_list, axis=0)
-    all_laser = np.concatenate(laser_list, axis=0)
-    all_offset = np.concatenate(offset_list, axis=0)
-    all_sources = np.concatenate(source_indices, axis=0)
-    all_source_ts = np.concatenate(source_timestamps, axis=0)
+    sensor_points = np.concatenate(aligned_points, axis=0)
+    sensor_intensity = np.concatenate(intensity_list, axis=0)
+    sensor_laser = np.concatenate(laser_list, axis=0)
+    sensor_offset = np.concatenate(offset_list, axis=0)
+    sensor_sources = np.concatenate(source_indices, axis=0)
+    sensor_source_ts = np.concatenate(source_timestamps, axis=0)
 
-    pre_mins = all_points.min(axis=0)
-    pre_maxs = all_points.max(axis=0)
-    pre_extents = pre_maxs - pre_mins
-    min_extent_xy = float(min(pre_extents[0], pre_extents[1]))
-
-    applied_crop: Optional[float] = None
-    if crop_square_m is not None and crop_square_m > 0:
+    applied_crop_sensor: Optional[float] = None
+    requested_crop = float(crop_square_m) if crop_square_m is not None else None
+    if requested_crop is not None and requested_crop > 0:
         min_allowed = MIN_CROP_METERS
-        if min_extent_xy < min_allowed:
-            raise RuntimeError(
-                f"LiDAR XY span ({min_extent_xy:.2f} m) is smaller than the minimum crop size {min_allowed} m"
-            )
-        requested = float(crop_square_m)
-        applied_crop = max(min_allowed, min(requested, min_extent_xy))
-        if abs(applied_crop - requested) > 1e-6:
-            print(
-                f"Adjusted crop size from {requested:.2f} m to {applied_crop:.2f} m based on available LiDAR coverage ({min_extent_xy:.2f} m)."
-            )
-        half = applied_crop / 2.0
+        span_x = float(sensor_points[:, 0].max() - sensor_points[:, 0].min())
+        span_y = float(sensor_points[:, 1].max() - sensor_points[:, 1].min())
+        available = min(span_x, span_y)
+        applied_crop_sensor = max(min_allowed, min(requested_crop, available))
+        half = applied_crop_sensor / 2.0
         mask = (
-            (all_points[:, 0] >= -half)
-            & (all_points[:, 0] <= half)
-            & (all_points[:, 1] >= -half)
-            & (all_points[:, 1] <= half)
+            (sensor_points[:, 0] >= -half)
+            & (sensor_points[:, 0] <= half)
+            & (sensor_points[:, 1] >= -half)
+            & (sensor_points[:, 1] <= half)
         )
         if not np.any(mask):
-            raise RuntimeError("Crop removed all LiDAR points; please choose a larger size")
-        all_points = all_points[mask]
-        all_intensity = all_intensity[mask]
-        all_laser = all_laser[mask]
-        all_offset = all_offset[mask]
-        all_sources = all_sources[mask]
-        all_source_ts = all_source_ts[mask]
+            raise RuntimeError("Sensor-frame crop removed all points; choose a larger size")
+        sensor_points = sensor_points[mask]
+        sensor_intensity = sensor_intensity[mask]
+        sensor_laser = sensor_laser[mask]
+        sensor_offset = sensor_offset[mask]
+        sensor_sources = sensor_sources[mask]
+        sensor_source_ts = sensor_source_ts[mask]
 
-    data_table = pa.Table.from_pydict({
-        "x": pa.array(all_points[:, 0], type=pa.float32()),
-        "y": pa.array(all_points[:, 1], type=pa.float32()),
-        "z": pa.array(all_points[:, 2], type=pa.float32()),
-        "intensity": pa.array(all_intensity, type=pa.float32()),
-        "laser_number": pa.array(all_laser, type=pa.int16()),
-        "offset_ns": pa.array(all_offset, type=pa.int64()),
-        "source_index": pa.array(all_sources, type=pa.int8()),
-        "source_timestamp_ns": pa.array(all_source_ts, type=pa.int64()),
+    sensor_table = pa.Table.from_pydict({
+        "x": pa.array(sensor_points[:, 0], type=pa.float32()),
+        "y": pa.array(sensor_points[:, 1], type=pa.float32()),
+        "z": pa.array(sensor_points[:, 2], type=pa.float32()),
+        "intensity": pa.array(sensor_intensity, type=pa.float32()),
+        "laser_number": pa.array(sensor_laser, type=pa.int16()),
+        "offset_ns": pa.array(sensor_offset, type=pa.int64()),
+        "source_index": pa.array(sensor_sources, type=pa.int8()),
+        "source_timestamp_ns": pa.array(sensor_source_ts, type=pa.int64()),
     })
 
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
     point_path = output_prefix.with_suffix(".parquet")
-    pq.write_table(data_table, point_path, compression=compression, use_dictionary=False)
-
-    mins = all_points.min(axis=0)
-    maxs = all_points.max(axis=0)
-    extents = maxs - mins
-
-    ref_rotation = reference_transform.rotation
-    ref_translation = reference_transform.translation
-    ref_quat = matrix_to_quaternion(ref_rotation)
+    pq.write_table(sensor_table, point_path, compression=compression, use_dictionary=False)
 
     city_tag = load_city_annotation(log_dir)
     city_enum = parse_city_enum(city_tag)
-    utm_xy, utm_zone, utm_to_wgs = city_xy_to_utm(translations[:, :2], city_enum)
-    lon_vals, lat_vals = utm_to_wgs.transform(utm_xy[:, 0], utm_xy[:, 1])
+    utm_tracks, utm_zone, utm_to_wgs = city_xy_to_utm(translations[:, :2], city_enum)
+
+    offset_xy = utm_tracks[center_index] - translations[center_index, :2]
+    city_points_full = np.concatenate(city_points_list, axis=0).astype(np.float64)
+    utm_points_full = np.column_stack([city_points_full[:, :2] + offset_xy, city_points_full[:, 2]])
+    utm_intensity_full = np.concatenate(intensity_list, axis=0)
+    utm_laser_full = np.concatenate(laser_list, axis=0)
+    utm_offset_full = np.concatenate(offset_list, axis=0)
+    utm_sources_full = np.concatenate(source_indices, axis=0)
+    utm_source_ts_full = np.concatenate(source_timestamps, axis=0)
+
+    utm_points = utm_points_full
+    utm_intensity = utm_intensity_full
+    utm_laser = utm_laser_full
+    utm_offset = utm_offset_full
+    utm_sources = utm_sources_full
+    utm_source_ts = utm_source_ts_full
+    applied_crop_utm: Optional[float] = None
+
+    if requested_crop is not None and requested_crop > 0:
+        min_allowed = MIN_CROP_METERS
+        span_x = float(utm_points_full[:, 0].max() - utm_points_full[:, 0].min())
+        span_y = float(utm_points_full[:, 1].max() - utm_points_full[:, 1].min())
+        available = min(span_x, span_y)
+        applied_crop_utm = max(min_allowed, min(requested_crop, available))
+        half = applied_crop_utm / 2.0
+        center_easting = float(utm_tracks[center_index, 0])
+        center_northing = float(utm_tracks[center_index, 1])
+        mask = (
+            (utm_points_full[:, 0] >= center_easting - half)
+            & (utm_points_full[:, 0] <= center_easting + half)
+            & (utm_points_full[:, 1] >= center_northing - half)
+            & (utm_points_full[:, 1] <= center_northing + half)
+        )
+        if not np.any(mask):
+            raise RuntimeError("UTM crop removed all points; choose a larger size")
+        utm_points = utm_points_full[mask]
+        utm_intensity = utm_intensity_full[mask]
+        utm_laser = utm_laser_full[mask]
+        utm_offset = utm_offset_full[mask]
+        utm_sources = utm_sources_full[mask]
+        utm_source_ts = utm_source_ts_full[mask]
+
+    utm_table = pa.Table.from_pydict({
+        "utm_e": pa.array(utm_points[:, 0], type=pa.float64()),
+        "utm_n": pa.array(utm_points[:, 1], type=pa.float64()),
+        "elevation": pa.array(utm_points[:, 2], type=pa.float32()),
+        "intensity": pa.array(utm_intensity, type=pa.float32()),
+        "laser_number": pa.array(utm_laser, type=pa.int16()),
+        "offset_ns": pa.array(utm_offset, type=pa.int64()),
+        "source_index": pa.array(utm_sources, type=pa.int8()),
+        "source_timestamp_ns": pa.array(utm_source_ts, type=pa.int64()),
+    })
+    utm_point_path = output_prefix.with_name(output_prefix.name + "_utm").with_suffix(".parquet")
+    pq.write_table(utm_table, utm_point_path, compression=compression, use_dictionary=False)
+
+    mins = sensor_points.min(axis=0)
+    maxs = sensor_points.max(axis=0)
+    extents = maxs - mins
+    sensor_extent_xy = (float(extents[0]), float(extents[1]))
+
+    utm_mins = utm_points.min(axis=0)
+    utm_maxs = utm_points.max(axis=0)
+    utm_extent_xy = (float(utm_maxs[0] - utm_mins[0]), float(utm_maxs[1] - utm_mins[1]))
+
+    lon_vals, lat_vals = utm_to_wgs.transform(utm_tracks[:, 0], utm_tracks[:, 1])
     positions_latlon = [[float(lat), float(lon)] for lat, lon in zip(lat_vals, lon_vals)]
-    positions_utm = [[utm_zone, float(easting), float(northing)] for easting, northing in utm_xy]
+    positions_utm = [[utm_zone, float(easting), float(northing)] for easting, northing in utm_tracks]
 
     center_lat = float(lat_vals[center_index])
     center_lon = float(lon_vals[center_index])
-    center_easting = float(utm_xy[center_index, 0])
-    center_northing = float(utm_xy[center_index, 1])
-    center_zone = utm_zone
+    center_easting = float(utm_tracks[center_index, 0])
+    center_northing = float(utm_tracks[center_index, 1])
     center_city_name = city_tag or city_enum.value
+
+    crop_sensor_arr = pa.array([applied_crop_sensor] if applied_crop_sensor is not None else [None], type=pa.float32())
+    crop_utm_arr = pa.array([applied_crop_utm] if applied_crop_utm is not None else [None], type=pa.float32())
 
     meta_dict = {
         "log_id": pa.array([log_dir.name]),
         "point_file": pa.array([point_path.name]),
+        "utm_point_file": pa.array([utm_point_path.name]),
         "center_timestamp_ns": pa.array([timestamps[center_index]], type=pa.int64()),
         "center_city_tx_m": pa.array([ref_translation[0]], type=pa.float64()),
         "center_city_ty_m": pa.array([ref_translation[1]], type=pa.float64()),
@@ -355,14 +422,16 @@ def create_macro_sweep(
         "center_city_qz": pa.array([ref_quat[3]], type=pa.float64()),
         "center_latitude_deg": pa.array([center_lat], type=pa.float64()),
         "center_longitude_deg": pa.array([center_lon], type=pa.float64()),
-        "center_utm_zone": pa.array([center_zone]),
+        "center_utm_zone": pa.array([utm_zone]),
         "center_utm_easting_m": pa.array([center_easting], type=pa.float64()),
         "center_utm_northing_m": pa.array([center_northing], type=pa.float64()),
         "city_name": pa.array([center_city_name]),
-        "point_count": pa.array([all_points.shape[0]], type=pa.int64()),
+        "point_count": pa.array([sensor_points.shape[0]], type=pa.int64()),
         "sweep_count": pa.array([len(timestamps)], type=pa.int32()),
         "duration_ns": pa.array([int(timestamps[-1] - timestamps[0])], type=pa.int64()),
         "duration_s": pa.array([(timestamps[-1] - timestamps[0]) / 1e9], type=pa.float64()),
+        "crop_square_m_sensor": crop_sensor_arr,
+        "crop_square_m_utm": crop_utm_arr,
         "bbox_x_min": pa.array([mins[0]], type=pa.float32()),
         "bbox_x_max": pa.array([maxs[0]], type=pa.float32()),
         "bbox_y_min": pa.array([mins[1]], type=pa.float32()),
@@ -372,6 +441,8 @@ def create_macro_sweep(
         "extent_x": pa.array([extents[0]], type=pa.float32()),
         "extent_y": pa.array([extents[1]], type=pa.float32()),
         "extent_z": pa.array([extents[2]], type=pa.float32()),
+        "utm_extent_x": pa.array([utm_extent_xy[0]], type=pa.float32()),
+        "utm_extent_y": pa.array([utm_extent_xy[1]], type=pa.float32()),
         "source_timestamps_ns": pa.array([json.dumps([int(ts) for ts in timestamps])]),
         "sensor_motion_length_m": pa.array([motion_length], type=pa.float64()),
         "sensor_displacement_m": pa.array([displacement], type=pa.float64()),
@@ -379,326 +450,19 @@ def create_macro_sweep(
         "sensor_positions_latlon_deg": pa.array([json.dumps(positions_latlon)]),
         "sensor_positions_utm": pa.array([json.dumps(positions_utm)]),
     }
-    if applied_crop is not None:
-        meta_dict["crop_square_m"] = pa.array([float(applied_crop)], type=pa.float32())
 
     meta_path = output_prefix.with_name(output_prefix.name + "_meta").with_suffix(".parquet")
     pq.write_table(pa.Table.from_pydict(meta_dict), meta_path, compression=compression, use_dictionary=True)
 
-    return point_path, meta_path, applied_crop
-
-    if len(feather_files) < len(sweep_indices):
-        raise ValueError("Not enough LiDAR sweeps in the log to satisfy the request")
-
-    poses = load_pose_map(pose_path)
-    sensor_in_ego = load_sensor_transform(calib_path)
-
-    selected_files = [feather_files[i] for i in sweep_indices]
-    timestamps = [int(f.stem) for f in selected_files]
-
-    city_from_sensor_list: List[SE3] = []
-    city_points_list: List[np.ndarray] = []
-    intensity_list: List[np.ndarray] = []
-    laser_list: List[np.ndarray] = []
-    offset_list: List[np.ndarray] = []
-
-    for file_path, ts in zip(selected_files, timestamps):
-        if ts not in poses:
-            raise KeyError(f"Timestamp {ts} missing in city_SE3_egovehicle")
-        ego_in_city = poses[ts]
-        city_from_sensor = compose(ego_in_city, sensor_in_ego)
-        city_from_sensor_list.append(city_from_sensor)
-
-        raw = read_lidar_feather(file_path)
-        points = np.column_stack([raw["x"], raw["y"], raw["z"]])
-        points_city = city_from_sensor.transform_points(points.astype(np.float64))
-        city_points_list.append(points_city.astype(np.float32))
-        intensity_list.append(raw["intensity"])
-        laser_list.append(raw["laser_number"])
-        offset_list.append(raw["offset_ns"])
-
-    translations = np.stack([tf.translation for tf in city_from_sensor_list], axis=0)
-    diffs = np.diff(translations, axis=0)
-    motion_length = float(np.linalg.norm(diffs, axis=1).sum()) if len(translations) > 1 else 0.0
-    displacement = float(np.linalg.norm(translations[-1] - translations[0])) if len(translations) > 1 else 0.0
-
-    reference_transform = city_from_sensor_list[center_index]
-    sensor_from_city = reference_transform.inverse()
-
-    aligned_points: List[np.ndarray] = []
-    source_indices: List[np.ndarray] = []
-    source_timestamps: List[np.ndarray] = []
-
-    for idx, (pts_city, ts) in enumerate(zip(city_points_list, timestamps)):
-        pts_ref = sensor_from_city.transform_points(pts_city.astype(np.float64)).astype(np.float32)
-        aligned_points.append(pts_ref)
-        count = pts_ref.shape[0]
-        source_indices.append(np.full(count, idx, dtype=np.int8))
-        source_timestamps.append(np.full(count, ts, dtype=np.int64))
-
-    all_points = np.concatenate(aligned_points, axis=0)
-    all_intensity = np.concatenate(intensity_list, axis=0)
-    all_laser = np.concatenate(laser_list, axis=0)
-    all_offset = np.concatenate(offset_list, axis=0)
-    all_sources = np.concatenate(source_indices, axis=0)
-    all_source_ts = np.concatenate(source_timestamps, axis=0)
-
-    crop_square_m = float(crop_square_m) if crop_square_m is not None else None
-    if crop_square_m is not None and crop_square_m > 0:
-        half = crop_square_m / 2.0
-        mask = (
-            (all_points[:, 0] >= -half)
-            & (all_points[:, 0] <= half)
-            & (all_points[:, 1] >= -half)
-            & (all_points[:, 1] <= half)
-        )
-        if not np.any(mask):
-            raise RuntimeError(f"Crop of {crop_square_m} m removed all LiDAR points")
-        all_points = all_points[mask]
-        all_intensity = all_intensity[mask]
-        all_laser = all_laser[mask]
-        all_offset = all_offset[mask]
-        all_sources = all_sources[mask]
-        all_source_ts = all_source_ts[mask]
-
-    data_table = pa.Table.from_pydict({
-        "x": pa.array(all_points[:, 0], type=pa.float32()),
-        "y": pa.array(all_points[:, 1], type=pa.float32()),
-        "z": pa.array(all_points[:, 2], type=pa.float32()),
-        "intensity": pa.array(all_intensity, type=pa.float32()),
-        "laser_number": pa.array(all_laser, type=pa.int16()),
-        "offset_ns": pa.array(all_offset, type=pa.int64()),
-        "source_index": pa.array(all_sources, type=pa.int8()),
-        "source_timestamp_ns": pa.array(all_source_ts, type=pa.int64()),
-    })
-
-    output_prefix.parent.mkdir(parents=True, exist_ok=True)
-    point_path = output_prefix.with_suffix(".parquet")
-    pq.write_table(data_table, point_path, compression=compression, use_dictionary=False)
-
-    mins = all_points.min(axis=0)
-    maxs = all_points.max(axis=0)
-    extents = maxs - mins
-
-    ref_rotation = reference_transform.rotation
-    ref_translation = reference_transform.translation
-    ref_quat = matrix_to_quaternion(ref_rotation)
-
-    city_tag = load_city_annotation(log_dir)
-    city_enum = parse_city_enum(city_tag)
-    utm_xy, utm_zone, utm_to_wgs = city_xy_to_utm(translations[:, :2], city_enum)
-    lon_vals, lat_vals = utm_to_wgs.transform(utm_xy[:, 0], utm_xy[:, 1])
-    positions_latlon = [[float(lat), float(lon)] for lat, lon in zip(lat_vals, lon_vals)]
-    positions_utm = [[utm_zone, float(easting), float(northing)] for easting, northing in utm_xy]
-
-    center_lat = float(lat_vals[center_index])
-    center_lon = float(lon_vals[center_index])
-    center_easting = float(utm_xy[center_index, 0])
-    center_northing = float(utm_xy[center_index, 1])
-    center_zone = utm_zone
-    center_city_name = city_tag or city_enum.value
-
-    meta_dict = {
-        "log_id": pa.array([log_dir.name]),
-        "point_file": pa.array([point_path.name]),
-        "center_timestamp_ns": pa.array([timestamps[center_index]], type=pa.int64()),
-        "center_city_tx_m": pa.array([ref_translation[0]], type=pa.float64()),
-        "center_city_ty_m": pa.array([ref_translation[1]], type=pa.float64()),
-        "center_city_tz_m": pa.array([ref_translation[2]], type=pa.float64()),
-        "center_city_qw": pa.array([ref_quat[0]], type=pa.float64()),
-        "center_city_qx": pa.array([ref_quat[1]], type=pa.float64()),
-        "center_city_qy": pa.array([ref_quat[2]], type=pa.float64()),
-        "center_city_qz": pa.array([ref_quat[3]], type=pa.float64()),
-        "center_latitude_deg": pa.array([center_lat], type=pa.float64()),
-        "center_longitude_deg": pa.array([center_lon], type=pa.float64()),
-        "center_utm_zone": pa.array([center_zone]),
-        "center_utm_easting_m": pa.array([center_easting], type=pa.float64()),
-        "center_utm_northing_m": pa.array([center_northing], type=pa.float64()),
-        "city_name": pa.array([center_city_name]),
-        "point_count": pa.array([all_points.shape[0]], type=pa.int64()),
-        "sweep_count": pa.array([len(timestamps)], type=pa.int32()),
-        "duration_ns": pa.array([int(timestamps[-1] - timestamps[0])], type=pa.int64()),
-        "duration_s": pa.array([(timestamps[-1] - timestamps[0]) / 1e9], type=pa.float64()),
-        "bbox_x_min": pa.array([mins[0]], type=pa.float32()),
-        "bbox_x_max": pa.array([maxs[0]], type=pa.float32()),
-        "bbox_y_min": pa.array([mins[1]], type=pa.float32()),
-        
-"bbox_y_max": pa.array([maxs[1]], type=pa.float32()),
-        "bbox_z_min": pa.array([mins[2]], type=pa.float32()),
-        "bbox_z_max": pa.array([maxs[2]], type=pa.float32()),
-        "extent_x": pa.array([extents[0]], type=pa.float32()),
-        "extent_y": pa.array([extents[1]], type=pa.float32()),
-        "extent_z": pa.array([extents[2]], type=pa.float32()),
-        "source_timestamps_ns": pa.array([json.dumps([int(ts) for ts in timestamps])]),
-        "sensor_motion_length_m": pa.array([motion_length], type=pa.float64()),
-        "sensor_displacement_m": pa.array([displacement], type=pa.float64()),
-        "sensor_positions_city_m": pa.array([json.dumps(translations.tolist())]),
-        "sensor_positions_latlon_deg": pa.array([json.dumps(positions_latlon)]),
-        "sensor_positions_utm": pa.array([json.dumps(positions_utm)]),
-    }
-    if crop_square_m is not None and crop_square_m > 0:
-        meta_dict["crop_square_m"] = pa.array([float(crop_square_m)], type=pa.float32())
-
-    meta_path = output_prefix.with_name(output_prefix.name + "_meta").with_suffix(".parquet")
-    pq.write_table(pa.Table.from_pydict(meta_dict), meta_path, compression=compression, use_dictionary=True)
-
-    return point_path, meta_path
-
-    if len(feather_files) < len(sweep_indices):
-        raise ValueError("Not enough LiDAR sweeps in the log to satisfy the request")
-
-    poses = load_pose_map(pose_path)
-    sensor_in_ego = load_sensor_transform(calib_path)
-
-    selected_files = [feather_files[i] for i in sweep_indices]
-    timestamps = [int(f.stem) for f in selected_files]
-
-    city_from_sensor_list: List[SE3] = []
-    city_points_list: List[np.ndarray] = []
-    intensity_list: List[np.ndarray] = []
-    laser_list: List[np.ndarray] = []
-    offset_list: List[np.ndarray] = []
-
-    for file_path, ts in zip(selected_files, timestamps):
-        if ts not in poses:
-            raise KeyError(f"Timestamp {ts} missing in city_SE3_egovehicle")
-        ego_in_city = poses[ts]
-        city_from_sensor = compose(ego_in_city, sensor_in_ego)
-        city_from_sensor_list.append(city_from_sensor)
-
-        raw = read_lidar_feather(file_path)
-        points = np.column_stack([raw["x"], raw["y"], raw["z"]])
-        points_city = city_from_sensor.transform_points(points.astype(np.float64))
-        city_points_list.append(points_city.astype(np.float32))
-        intensity_list.append(raw["intensity"])
-        laser_list.append(raw["laser_number"])
-        offset_list.append(raw["offset_ns"])
-
-    translations = np.stack([tf.translation for tf in city_from_sensor_list], axis=0)
-    diffs = np.diff(translations, axis=0)
-    motion_length = float(np.linalg.norm(diffs, axis=1).sum()) if len(translations) > 1 else 0.0
-    displacement = float(np.linalg.norm(translations[-1] - translations[0])) if len(translations) > 1 else 0.0
-
-    reference_transform = city_from_sensor_list[center_index]
-    sensor_from_city = reference_transform.inverse()
-
-    aligned_points: List[np.ndarray] = []
-    source_indices: List[np.ndarray] = []
-    source_timestamps: List[np.ndarray] = []
-
-    for idx, (pts_city, ts) in enumerate(zip(city_points_list, timestamps)):
-        pts_ref = sensor_from_city.transform_points(pts_city.astype(np.float64)).astype(np.float32)
-        aligned_points.append(pts_ref)
-        count = pts_ref.shape[0]
-        source_indices.append(np.full(count, idx, dtype=np.int8))
-        source_timestamps.append(np.full(count, ts, dtype=np.int64))
-
-    all_points = np.concatenate(aligned_points, axis=0)
-    all_intensity = np.concatenate(intensity_list, axis=0)
-    all_laser = np.concatenate(laser_list, axis=0)
-    all_offset = np.concatenate(offset_list, axis=0)
-    all_sources = np.concatenate(source_indices, axis=0)
-    all_source_ts = np.concatenate(source_timestamps, axis=0)
-
-    if crop_square_m is not None:
-        half = float(crop_square_m) / 2.0
-        mask = (
-            (all_points[:, 0] >= -half)
-            & (all_points[:, 0] <= half)
-            & (all_points[:, 1] >= -half)
-            & (all_points[:, 1] <= half)
-        )
-        if not np.any(mask):
-            raise RuntimeError(f"Crop of {crop_square_m} m removed all LiDAR points")
-        all_points = all_points[mask]
-        all_intensity = all_intensity[mask]
-        all_laser = all_laser[mask]
-        all_offset = all_offset[mask]
-        all_sources = all_sources[mask]
-        all_source_ts = all_source_ts[mask]
-
-    data_table = pa.Table.from_pydict({
-        "x": pa.array(all_points[:, 0], type=pa.float32()),
-        "y": pa.array(all_points[:, 1], type=pa.float32()),
-        "z": pa.array(all_points[:, 2], type=pa.float32()),
-        "intensity": pa.array(all_intensity, type=pa.float32()),
-        "laser_number": pa.array(all_laser, type=pa.int16()),
-        "offset_ns": pa.array(all_offset, type=pa.int64()),
-        "source_index": pa.array(all_sources, type=pa.int8()),
-        "source_timestamp_ns": pa.array(all_source_ts, type=pa.int64()),
-    })
-
-    output_prefix.parent.mkdir(parents=True, exist_ok=True)
-    point_path = output_prefix.with_suffix(".parquet")
-    pq.write_table(data_table, point_path, compression=compression, use_dictionary=False)
-
-    mins = all_points.min(axis=0)
-    maxs = all_points.max(axis=0)
-    extents = maxs - mins
-
-    ref_rotation = reference_transform.rotation
-    ref_translation = reference_transform.translation
-    ref_quat = matrix_to_quaternion(ref_rotation)
-
-    city_tag = load_city_annotation(log_dir)
-    city_enum = parse_city_enum(city_tag)
-    utm_xy, utm_zone, utm_to_wgs = city_xy_to_utm(translations[:, :2], city_enum)
-    lon_vals, lat_vals = utm_to_wgs.transform(utm_xy[:, 0], utm_xy[:, 1])
-    positions_latlon = [[float(lat), float(lon)] for lat, lon in zip(lat_vals, lon_vals)]
-    positions_utm = [[utm_zone, float(easting), float(northing)] for easting, northing in utm_xy]
-
-    center_lat = float(lat_vals[center_index])
-    center_lon = float(lon_vals[center_index])
-    center_easting = float(utm_xy[center_index, 0])
-    center_northing = float(utm_xy[center_index, 1])
-    center_zone = utm_zone
-    center_city_name = city_tag or city_enum.value
-
-    meta_dict = {
-        "log_id": pa.array([log_dir.name]),
-        "point_file": pa.array([point_path.name]),
-        "center_timestamp_ns": pa.array([timestamps[center_index]], type=pa.int64()),
-        "center_city_tx_m": pa.array([ref_translation[0]], type=pa.float64()),
-        "center_city_ty_m": pa.array([ref_translation[1]], type=pa.float64()),
-        "center_city_tz_m": pa.array([ref_translation[2]], type=pa.float64()),
-        "center_city_qw": pa.array([ref_quat[0]], type=pa.float64()),
-        "center_city_qx": pa.array([ref_quat[1]], type=pa.float64()),
-        "center_city_qy": pa.array([ref_quat[2]], type=pa.float64()),
-        "center_city_qz": pa.array([ref_quat[3]], type=pa.float64()),
-        "center_latitude_deg": pa.array([center_lat], type=pa.float64()),
-        "center_longitude_deg": pa.array([center_lon], type=pa.float64()),
-        "center_utm_zone": pa.array([center_zone]),
-        "center_utm_easting_m": pa.array([center_easting], type=pa.float64()),
-        "center_utm_northing_m": pa.array([center_northing], type=pa.float64()),
-        "city_name": pa.array([center_city_name]),
-        "point_count": pa.array([all_points.shape[0]], type=pa.int64()),
-        "sweep_count": pa.array([len(timestamps)], type=pa.int32()),
-        "duration_ns": pa.array([int(timestamps[-1] - timestamps[0])], type=pa.int64()),
-        "duration_s": pa.array([(timestamps[-1] - timestamps[0]) / 1e9], type=pa.float64()),
-        "bbox_x_min": pa.array([mins[0]], type=pa.float32()),
-        "bbox_x_max": pa.array([maxs[0]], type=pa.float32()),
-        "bbox_y_min": pa.array([mins[1]], type=pa.float32()),
-        "bbox_y_max": pa.array([maxs[1]], type=pa.float32()),
-        "bbox_z_min": pa.array([mins[2]], type=pa.float32()),
-        "bbox_z_max": pa.array([maxs[2]], type=pa.float32()),
-        "extent_x": pa.array([extents[0]], type=pa.float32()),
-        "extent_y": pa.array([extents[1]], type=pa.float32()),
-        "extent_z": pa.array([extents[2]], type=pa.float32()),
-        "source_timestamps_ns": pa.array([json.dumps([int(ts) for ts in timestamps])]),
-        "sensor_motion_length_m": pa.array([motion_length], type=pa.float64()),
-        "sensor_displacement_m": pa.array([displacement], type=pa.float64()),
-        "sensor_positions_city_m": pa.array([json.dumps(translations.tolist())]),
-        "sensor_positions_latlon_deg": pa.array([json.dumps(positions_latlon)]),
-        "sensor_positions_utm": pa.array([json.dumps(positions_utm)]),
-    }
-    if crop_square_m is not None:
-        meta_dict["crop_square_m"] = pa.array([float(crop_square_m)], type=pa.float32())
-
-    meta_path = output_prefix.with_name(output_prefix.name + "_meta").with_suffix(".parquet")
-    pq.write_table(pa.Table.from_pydict(meta_dict), meta_path, compression=compression, use_dictionary=True)
-
-    return point_path, meta_path
-
+    return MacroSweepResult(
+        point_path=point_path,
+        meta_path=meta_path,
+        utm_point_path=utm_point_path,
+        applied_crop_sensor=applied_crop_sensor,
+        applied_crop_utm=applied_crop_utm,
+        sensor_extent_xy=sensor_extent_xy,
+        utm_extent_xy=utm_extent_xy,
+    )
 
 
 def main() -> None:
@@ -784,9 +548,9 @@ def main() -> None:
     if args.crop_32:
         crop_size = MIN_CROP_METERS
     if crop_size is not None and crop_size < MIN_CROP_METERS:
-        raise ValueError(f'Crop size must be at least {MIN_CROP_METERS} meters')
+        raise ValueError(f"Crop size must be at least {MIN_CROP_METERS} meters")
 
-    point_path, meta_path, applied_crop = create_macro_sweep(
+    macro = create_macro_sweep(
         log_dir=log_dir,
         sweep_indices=indices,
         center_index=center_index,
@@ -796,15 +560,30 @@ def main() -> None:
         crop_square_m=crop_size,
     )
 
-    print(f"Created point cloud parquet: {point_path}")
+    point_path = macro.point_path
+    meta_path = macro.meta_path
+    utm_point_path = macro.utm_point_path
+    sensor_extent_x, sensor_extent_y = macro.sensor_extent_xy
+    utm_extent_x, utm_extent_y = macro.utm_extent_xy
+
+    print(f"Created point cloud parquet: {point_path} (sensor extent {sensor_extent_x:.2f} m x {sensor_extent_y:.2f} m)")
     print(f"Created metadata parquet: {meta_path}")
+    print(f"Created UTM point parquet: {utm_point_path} (utm extent {utm_extent_x:.2f} m x {utm_extent_y:.2f} m)")
     if crop_size is not None:
-        if applied_crop is not None and abs(applied_crop - crop_size) > 1e-6:
-            print(f"Crop request {crop_size:.2f} m adjusted to {applied_crop:.2f} m based on available coverage")
-        elif applied_crop is None:
-            print('Crop request skipped; using full extent.')
+        applied_crop_sensor = macro.applied_crop_sensor
+        applied_crop_utm = macro.applied_crop_utm
+        if applied_crop_sensor is not None and abs(applied_crop_sensor - crop_size) > 1e-6:
+            print(f"Sensor-frame crop {crop_size:.2f} m adjusted to {applied_crop_sensor:.2f} m")
+        elif applied_crop_sensor is None:
+            print("Sensor-frame crop skipped; using full extent.")
         else:
-            print(f"Applied crop size: {applied_crop:.2f} m")
+            print(f"Applied sensor-frame crop: {applied_crop_sensor:.2f} m")
+        if applied_crop_utm is not None and abs(applied_crop_utm - crop_size) > 1e-6:
+            print(f"UTM crop {crop_size:.2f} m adjusted to {applied_crop_utm:.2f} m")
+        elif applied_crop_utm is None:
+            print("UTM crop skipped; using full extent.")
+        else:
+            print(f"Applied UTM crop: {applied_crop_utm:.2f} m")
 
 
 if __name__ == "__main__":

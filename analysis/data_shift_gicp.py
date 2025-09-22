@@ -49,15 +49,16 @@ def summarize(values: np.ndarray) -> dict:
     }
 
 
-def evaluate(points: np.ndarray, dsm_points: np.ndarray) -> dict:
+def evaluate(points: np.ndarray, dsm_points: np.ndarray) -> tuple[dict, np.ndarray]:
     tree = cKDTree(dsm_points[:, :2])
     nn_dist, idx = tree.query(points[:, :2], k=1)
     dsm_z = dsm_points[idx, 2]
     vertical_diff = dsm_z - points[:, 2]
-    return {
+    metrics = {
         "vertical": summarize(vertical_diff),
         "horizontal": summarize(nn_dist),
     }
+    return metrics, vertical_diff
 
 
 def make_output_paths(lidar_path: Path, output_dir: Path) -> dict:
@@ -71,23 +72,48 @@ def make_output_paths(lidar_path: Path, output_dir: Path) -> dict:
     }
 
 
-def load_inputs(lidar_path: Path, meta_path: Path, dsm_path: Path):
-    meta = pd.read_parquet(meta_path).iloc[0]
+def load_inputs(lidar_path: Path, meta_path: Path | None, dsm_path: Path):
     lidar_df = pd.read_parquet(lidar_path)
-    rotation = quat_to_rot(meta["center_city_qw"], meta["center_city_qx"], meta["center_city_qy"], meta["center_city_qz"])
-    translation = np.array([
-        meta["center_city_tx_m"],
-        meta["center_city_ty_m"],
-        meta["center_city_tz_m"],
-    ])
-    xyz_local = lidar_df[["x", "y", "z"]].to_numpy()
-    xyz_city = (rotation @ xyz_local.T).T + translation
+    meta = pd.read_parquet(meta_path).iloc[0] if meta_path is not None else None
 
-    city_positions = np.array(json.loads(meta["sensor_positions_city_m"]))
-    utm_positions = np.array([[e, n] for _, e, n in json.loads(meta["sensor_positions_utm"])])
-    coeff_e, coeff_n = fit_affine(city_positions[:, :2], utm_positions)
-    utm_e = apply_affine(coeff_e, xyz_city[:, :2])
-    utm_n = apply_affine(coeff_n, xyz_city[:, :2])
+    has_utm_columns = {"utm_e", "utm_n"}.issubset(lidar_df.columns)
+
+    if has_utm_columns:
+        utm_e = lidar_df["utm_e"].to_numpy(dtype=float)
+        utm_n = lidar_df["utm_n"].to_numpy(dtype=float)
+        if "elevation" in lidar_df.columns:
+            z_values = lidar_df["elevation"].to_numpy(dtype=float)
+        elif "z" in lidar_df.columns:
+            z_values = lidar_df["z"].to_numpy(dtype=float)
+        else:
+            raise ValueError("LiDAR parquet must include an 'elevation' or 'z' column for height values.")
+        xyz_city = np.column_stack([utm_e, utm_n, z_values])
+    else:
+        if meta is None:
+            raise ValueError(
+                "Metadata parquet is required when LiDAR parquet lacks 'utm_e'/'utm_n' columns."
+            )
+        rotation = quat_to_rot(
+            meta["center_city_qw"],
+            meta["center_city_qx"],
+            meta["center_city_qy"],
+            meta["center_city_qz"],
+        )
+        translation = np.array(
+            [
+                meta["center_city_tx_m"],
+                meta["center_city_ty_m"],
+                meta["center_city_tz_m"],
+            ]
+        )
+        xyz_local = lidar_df[["x", "y", "z"]].to_numpy()
+        xyz_city = (rotation @ xyz_local.T).T + translation
+
+        city_positions = np.array(json.loads(meta["sensor_positions_city_m"]))
+        utm_positions = np.array([[e, n] for _, e, n in json.loads(meta["sensor_positions_utm"])])
+        coeff_e, coeff_n = fit_affine(city_positions[:, :2], utm_positions)
+        utm_e = apply_affine(coeff_e, xyz_city[:, :2])
+        utm_n = apply_affine(coeff_n, xyz_city[:, :2])
 
     las = laspy.read(dsm_path)
     dsm_points = np.column_stack([las.x, las.y, las.z])
@@ -102,7 +128,6 @@ def load_inputs(lidar_path: Path, meta_path: Path, dsm_path: Path):
     )
     dsm_subset = dsm_points[mask]
     return meta, lidar_df, xyz_city, utm_e, utm_n, dsm_subset
-
 
 def query_dsm_height(dsm_points: np.ndarray, easting: float, northing: float) -> float:
     tree = cKDTree(dsm_points[:, :2])
@@ -180,30 +205,58 @@ def save_parquet(template_df: pd.DataFrame, points: np.ndarray, path: Path) -> N
     out_df.to_parquet(path, index=False)
 
 
-def process_alignment(lidar_path: Path, meta_path: Path, dsm_path: Path, output_dir: Path, run_gicp_flag: bool = True) -> dict:
+def process_alignment(
+    lidar_path: Path,
+    meta_path: Path | None,
+    dsm_path: Path,
+    output_dir: Path,
+    run_gicp_flag: bool = True,
+) -> dict:
     meta, lidar_df, xyz_city, utm_e, utm_n, dsm_subset = load_inputs(lidar_path, meta_path, dsm_path)
 
     baseline_points = np.column_stack([utm_e, utm_n, xyz_city[:, 2]])
-    baseline_metrics = evaluate(baseline_points, dsm_subset)
+    baseline_metrics, baseline_vertical_diff = evaluate(baseline_points, dsm_subset)
 
-    center_dsm_z = query_dsm_height(dsm_subset, meta["center_utm_easting_m"], meta["center_utm_northing_m"])
-    center_city_z = float(meta["center_city_tz_m"])
-    vertical_offset = center_dsm_z - center_city_z
+    if meta is not None:
+        center_dsm_z = query_dsm_height(
+            dsm_subset,
+            float(meta["center_utm_easting_m"]),
+            float(meta["center_utm_northing_m"]),
+        )
+        center_city_z = float(meta["center_city_tz_m"])
+        vertical_offset = center_dsm_z - center_city_z
+        offset_details = {
+            "method": "metadata_center",
+            "center_dsm_z": center_dsm_z,
+            "center_city_z": center_city_z,
+        }
+    else:
+        center_dsm_z = None
+        center_city_z = None
+        vertical_offset = float(np.median(baseline_vertical_diff))
+        offset_details = {
+            "method": "median_vertical_difference",
+            "baseline_vertical_median": float(np.median(baseline_vertical_diff)),
+            "baseline_vertical_mean": float(np.mean(baseline_vertical_diff)),
+        }
 
     shifted_points = baseline_points.copy()
     shifted_points[:, 2] += vertical_offset
-    shifted_metrics = evaluate(shifted_points, dsm_subset)
+    shifted_metrics, _ = evaluate(shifted_points, dsm_subset)
 
     outputs = make_output_paths(lidar_path, output_dir)
     save_parquet(lidar_df, shifted_points, outputs["shifted"])
 
     metrics = {
-        "center_dsm_z": center_dsm_z,
-        "center_city_z": center_city_z,
         "vertical_offset_applied": vertical_offset,
         "baseline": baseline_metrics,
         "after_shift": shifted_metrics,
+        "offset_estimation": offset_details,
     }
+    if center_dsm_z is not None:
+        metrics["center_dsm_z"] = center_dsm_z
+    if center_city_z is not None:
+        metrics["center_city_z"] = center_city_z
 
     gicp_info = None
     transformed_points = shifted_points
@@ -217,7 +270,7 @@ def process_alignment(lidar_path: Path, meta_path: Path, dsm_path: Path, output_
         gicp_result = run_gicp(clouds["source_centered"], clouds["target_centered"])
         gicp_transform = compose_transform(gicp_result, clouds["src_centroid"], clouds["tgt_centroid"])
         transformed_points = apply_transform(shifted_points, gicp_transform)
-        gicp_metrics = evaluate(transformed_points, dsm_subset)
+        gicp_metrics, _ = evaluate(transformed_points, dsm_subset)
         translation = gicp_transform[:3, 3]
         gicp_info = {
             "registration_fitness": float(gicp_result.fitness),
@@ -244,7 +297,6 @@ def process_alignment(lidar_path: Path, meta_path: Path, dsm_path: Path, output_
         "gicp_info": gicp_info,
     }
 
-
 def launch_gui():
     root = tk.Tk()
     root.title("LiDAR Shift + GICP Alignment")
@@ -270,12 +322,28 @@ def launch_gui():
 
     def run_processing():
         try:
-            lidar_path = Path(path_vars["lidar"].get())
-            meta_path = Path(path_vars["meta"].get())
-            dsm_path = Path(path_vars["dsm"].get())
-            output_dir = Path(path_vars["output"].get())
-            if not lidar_path.is_file() or not meta_path.is_file() or not dsm_path.is_file():
-                raise FileNotFoundError("Please select valid LiDAR, metadata, and DSM files.")
+            lidar_value = path_vars["lidar"].get().strip()
+            meta_value = path_vars["meta"].get().strip()
+            dsm_value = path_vars["dsm"].get().strip()
+            output_value = path_vars["output"].get().strip()
+
+            if not lidar_value:
+                raise FileNotFoundError("Please select a LiDAR parquet file.")
+            if not dsm_value:
+                raise FileNotFoundError("Please select a DSM LAS/LAZ file.")
+
+            lidar_path = Path(lidar_value)
+            dsm_path = Path(dsm_value)
+            meta_path = Path(meta_value) if meta_value else None
+            output_dir = Path(output_value) if output_value else lidar_path.parent
+
+            if not lidar_path.is_file():
+                raise FileNotFoundError(f"LiDAR parquet not found: {lidar_path}")
+            if not dsm_path.is_file():
+                raise FileNotFoundError(f"DSM file not found: {dsm_path}")
+            if meta_path is not None and not meta_path.is_file():
+                raise FileNotFoundError(f"Metadata parquet not found: {meta_path}")
+
             result = process_alignment(lidar_path, meta_path, dsm_path, output_dir, run_gicp_flag=True)
             metrics_path = result["outputs"]["metrics_json"]
             shift_path = result["outputs"]["shifted"]
@@ -289,10 +357,9 @@ def launch_gui():
             messagebox.showinfo("Completed", "\n".join(msg))
         except Exception as exc:  # pragma: no cover
             messagebox.showerror("Error", str(exc))
-
     labels = {
         "lidar": "LiDAR parquet",
-        "meta": "Metadata parquet",
+        "meta": "Metadata parquet (optional)",
         "dsm": "DSM LAZ",
         "output": "Output directory",
     }
@@ -315,7 +382,7 @@ def launch_gui():
 def parse_args():
     parser = argparse.ArgumentParser(description="Align LiDAR sweep to DSM by vertical shift and optional GICP refinement.")
     parser.add_argument("--lidar", type=Path, help="Path to LiDAR parquet file")
-    parser.add_argument("--meta", type=Path, help="Path to metadata parquet file")
+    parser.add_argument("--meta", type=Path, help="Path to metadata parquet file (optional; required for sensor-frame inputs)")
     parser.add_argument("--dsm", type=Path, help="Path to DSM LAS/LAZ file")
     parser.add_argument("--output-dir", type=Path, help="Directory for outputs")
     parser.add_argument("--skip-gicp", action="store_true", help="Skip the GICP refinement step")
@@ -325,12 +392,23 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.gui or not (args.lidar and args.meta and args.dsm):
+    if args.gui or not (args.lidar and args.dsm):
         launch_gui()
         return
 
-    output_dir = args.output_dir or args.lidar.parent
-    result = process_alignment(args.lidar, args.meta, args.dsm, output_dir, run_gicp_flag=not args.skip_gicp)
+    lidar_path = args.lidar
+    dsm_path = args.dsm
+    meta_path = args.meta
+
+    if not lidar_path.is_file():
+        raise FileNotFoundError(f"LiDAR parquet not found: {lidar_path}")
+    if not dsm_path.is_file():
+        raise FileNotFoundError(f"DSM file not found: {dsm_path}")
+    if meta_path is not None and not meta_path.is_file():
+        raise FileNotFoundError(f"Metadata parquet not found: {meta_path}")
+
+    output_dir = args.output_dir or lidar_path.parent
+    result = process_alignment(lidar_path, meta_path, dsm_path, output_dir, run_gicp_flag=not args.skip_gicp)
     metrics = result["metrics"]
     metrics_path = result["outputs"]["metrics_json"]
     print("Metrics saved to:", metrics_path)
@@ -345,6 +423,6 @@ def main():
     elif not args.skip_gicp:
         print("GICP output unavailable; see metrics file for details.")
 
-
 if __name__ == "__main__":
     main()
+

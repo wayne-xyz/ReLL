@@ -110,22 +110,34 @@ def infer_lidar_points(lidar_path: Path, meta_path: Path | None) -> tuple[np.nda
 def load_dsm_points(dsm_path: Path) -> tuple[np.ndarray, dict]:
     print(f"Loading DSM file: {dsm_path}")
     las = laspy.read(dsm_path)
+    header = las.header
     pts = np.column_stack([las.x, las.y, las.z])
+
+    epsg_attr = getattr(header, "epsg", None)
     info: dict[str, object] = {
-        "epsg": las.header.epsg,
+        "epsg": epsg_attr,
         "utm_zone": None,
         "utm_hemisphere": None,
         "crs": None,
     }
 
-    crs = las.header.parse_crs()
+    crs = None
+    if hasattr(header, "parse_crs"):
+        try:
+            crs = header.parse_crs()
+        except Exception as exc:  # pragma: no cover -- laspy versions vary
+            print(f"Warning: failed to parse CRS from LAS header ({exc})")
     if crs is not None:
         info["crs"] = crs.to_string()
-        print(f"DSM CRS: {crs.to_string()} (EPSG: {crs.to_epsg()})")
+        crs_epsg = crs.to_epsg()
+        print(f"DSM CRS: {crs.to_string()} (EPSG: {crs_epsg})")
+        if crs_epsg is not None:
+            info["epsg"] = crs_epsg
+            epsg_attr = crs_epsg
     else:
         print("DSM CRS metadata unavailable; relying on file naming conventions.")
 
-    epsg = las.header.epsg
+    epsg = epsg_attr
     if epsg is not None:
         if 32601 <= epsg <= 32660:
             info["utm_zone"] = f"{epsg - 32600}N"
@@ -135,7 +147,6 @@ def load_dsm_points(dsm_path: Path) -> tuple[np.ndarray, dict]:
             info["utm_hemisphere"] = "S"
     if info["utm_zone"]:
         print(f"DSM UTM zone inferred as {info['utm_zone']}")
-
     pts = np.asarray(pts, dtype=float)
     if pts.size:
         mins = pts.min(axis=0)

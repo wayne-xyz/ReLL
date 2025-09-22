@@ -41,7 +41,7 @@ def main() -> None:
     sweep_indices = list(range(args.sweep_count))
     center_index = args.center_index if args.center_index is not None else len(sweep_indices) // 2
 
-    point_path, meta_path, applied_crop = create_macro_sweep(
+    macro = create_macro_sweep(
         log_dir=log_dir,
         sweep_indices=sweep_indices,
         center_index=center_index,
@@ -49,18 +49,33 @@ def main() -> None:
         compression="zstd",
         crop_square_m=crop_size,
     )
-    print(f"Point parquet: {point_path}")
-    print(f"Meta parquet: {meta_path}")
-    if crop_size is not None:
-        if applied_crop is not None and abs(applied_crop - crop_size) > 1e-6:
-            print(f"Crop request {crop_size:.2f} m adjusted to {applied_crop:.2f} m")
-        elif applied_crop is None:
-            print("Crop request skipped; using full extent.")
-        else:
-            print(f"Applied crop size: {applied_crop:.2f} m")
-    crop_for_stage2 = applied_crop if applied_crop is not None else None
+    point_path = macro.point_path
+    meta_path = macro.meta_path
+    utm_point_path = macro.utm_point_path
+    sensor_extent_x, sensor_extent_y = macro.sensor_extent_xy
+    utm_extent_x, utm_extent_y = macro.utm_extent_xy
 
-    tif_path, laz_path = run_stage_two(
+    print(f"Point parquet: {point_path} (sensor extent {sensor_extent_x:.2f} m x {sensor_extent_y:.2f} m)")
+    print(f"Meta parquet: {meta_path}")
+    print(f"UTM point parquet: {utm_point_path} (utm extent {utm_extent_x:.2f} m x {utm_extent_y:.2f} m)")
+    if crop_size is not None:
+        applied_crop_sensor = macro.applied_crop_sensor
+        applied_crop_utm = macro.applied_crop_utm
+        if applied_crop_sensor is not None and abs(applied_crop_sensor - crop_size) > 1e-6:
+            print(f"Sensor-frame crop {crop_size:.2f} m adjusted to {applied_crop_sensor:.2f} m")
+        elif applied_crop_sensor is None:
+            print("Sensor-frame crop skipped; using full extent.")
+        else:
+            print(f"Applied sensor-frame crop: {applied_crop_sensor:.2f} m")
+        if applied_crop_utm is not None and abs(applied_crop_utm - crop_size) > 1e-6:
+            print(f"UTM crop {crop_size:.2f} m adjusted to {applied_crop_utm:.2f} m")
+        elif applied_crop_utm is None:
+            print("UTM crop skipped; using full extent.")
+        else:
+            print(f"Applied UTM crop: {applied_crop_utm:.2f} m")
+    crop_for_stage2 = macro.applied_crop_sensor if macro.applied_crop_sensor is not None else None
+
+    stage_two = run_stage_two(
         points_path=point_path,
         meta_path=meta_path,
         city_root=city_root,
@@ -70,8 +85,11 @@ def main() -> None:
         base_name=args.prefix,
         crop_square_m=crop_for_stage2,
     )
-    print(f"Imagery: {tif_path}")
-    print(f"DSM: {laz_path}")
+    tif_path = stage_two.tif_path
+    laz_path = stage_two.laz_path
+    utm_width, utm_height = stage_two.utm_extent_xy
+    print(f"Imagery: {tif_path} (footprint {utm_width:.2f} m x {utm_height:.2f} m)")
+    print(f"DSM: {laz_path} (footprint {utm_width:.2f} m x {utm_height:.2f} m)")
 
 
 if __name__ == "__main__":
