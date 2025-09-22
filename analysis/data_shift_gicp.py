@@ -10,10 +10,19 @@ import open3d as o3d
 import pandas as pd
 from scipy.spatial import cKDTree
 
+from .gicp_core import (
+    GICPParams,
+    prepare_downsampled_clouds as core_prepare_downsampled_clouds,
+    run_gicp as core_run_gicp,
+    compose_transform as core_compose_transform,
+    apply_transform as core_apply_transform,
+)
+
 VOXEL_SIZE = 0.5
-NORMAL_RADIUS = 2.0
+NORMAL_RADIUS = 2.0  # legacy: no longer used for normal estimation
+NORMAL_K = 20        # use fixed K for PCA normals (density-invariant)
 MAX_CORR_DIST = 1.0
-MAX_ITER = 30
+MAX_ITER = 80
 GROUND_THRESHOLD = -14.5
 
 
@@ -136,65 +145,32 @@ def query_dsm_height(dsm_points: np.ndarray, easting: float, northing: float) ->
 
 
 def build_cloud(points: np.ndarray) -> o3d.geometry.PointCloud:
+    # Kept for backward compatibility; not used after refactor
     pc = o3d.geometry.PointCloud()
     pc.points = o3d.utility.Vector3dVector(points.astype(np.float64))
     return pc
 
 
-def prepare_downsampled_clouds(source_points: np.ndarray, target_points: np.ndarray):
-    source_pc = build_cloud(source_points)
-    target_pc = build_cloud(target_points)
-
-    source_down = source_pc.voxel_down_sample(VOXEL_SIZE)
-    target_down = target_pc.voxel_down_sample(VOXEL_SIZE)
-
-    if len(source_down.points) == 0 or len(target_down.points) == 0:
-        raise RuntimeError("Downsampled cloud empty. Adjust voxel size or ground mask.")
-
-    search_param = o3d.geometry.KDTreeSearchParamHybrid(radius=NORMAL_RADIUS, max_nn=60)
-    source_down.estimate_normals(search_param)
-    target_down.estimate_normals(search_param)
-
-    src_centroid = np.mean(np.asarray(source_down.points), axis=0)
-    tgt_centroid = np.mean(np.asarray(target_down.points), axis=0)
-
-    source_centered = source_down.translate(-src_centroid, relative=False)
-    target_centered = target_down.translate(-tgt_centroid, relative=False)
-
-    return {
-        "source_pc": source_pc,
-        "target_pc": target_pc,
-        "source_centered": source_centered,
-        "target_centered": target_centered,
-        "src_centroid": src_centroid,
-        "tgt_centroid": tgt_centroid,
-    }
+def prepare_downsampled_clouds(
+    source_points: np.ndarray,
+    target_points: np.ndarray,
+    shared_origin: np.ndarray | None = None,
+):
+    params = GICPParams(voxel_size=VOXEL_SIZE, normal_k=20, max_corr_dist=MAX_CORR_DIST, max_iter=MAX_ITER)
+    return core_prepare_downsampled_clouds(source_points, target_points, shared_origin=shared_origin, params=params)
 
 
 def run_gicp(source_centered: o3d.geometry.PointCloud, target_centered: o3d.geometry.PointCloud):
-    estimation = o3d.pipelines.registration.TransformationEstimationForGeneralizedICP()
-    criteria = o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=MAX_ITER)
-    return o3d.pipelines.registration.registration_generalized_icp(
-        source_centered,
-        target_centered,
-        MAX_CORR_DIST,
-        np.eye(4),
-        estimation,
-        criteria,
-    )
+    params = GICPParams(voxel_size=VOXEL_SIZE, normal_k=20, max_corr_dist=MAX_CORR_DIST, max_iter=MAX_ITER)
+    return core_run_gicp(source_centered, target_centered, params=params)
 
 
 def compose_transform(result: o3d.pipelines.registration.RegistrationResult, src_centroid: np.ndarray, tgt_centroid: np.ndarray) -> np.ndarray:
-    T_src = np.eye(4)
-    T_src[:3, 3] = -src_centroid
-    T_tgt = np.eye(4)
-    T_tgt[:3, 3] = tgt_centroid
-    return T_tgt @ result.transformation @ T_src
+    return core_compose_transform(result, src_centroid, tgt_centroid)
 
 
 def apply_transform(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
-    homogeneous = np.hstack([points, np.ones((points.shape[0], 1))])
-    return (transform @ homogeneous.T).T[:, :3]
+    return core_apply_transform(points, transform)
 
 
 def save_parquet(template_df: pd.DataFrame, points: np.ndarray, path: Path) -> None:
@@ -247,6 +223,18 @@ def process_alignment(
     outputs = make_output_paths(lidar_path, output_dir)
     save_parquet(lidar_df, shifted_points, outputs["shifted"])
 
+    if meta is not None:
+        anchor_xy = np.array([float(meta["center_utm_easting_m"]), float(meta["center_utm_northing_m"])] , dtype=np.float64)
+    else:
+        lidar_xy_mean = np.mean(shifted_points[:, :2], axis=0)
+        dsm_xy_mean = np.mean(dsm_subset[:, :2], axis=0)
+        anchor_xy = 0.5 * (lidar_xy_mean + dsm_xy_mean)
+    lidar_z_median = float(np.median(shifted_points[:, 2]))
+    dsm_z_median = float(np.median(dsm_subset[:, 2]))
+    anchor_z = 0.5 * (lidar_z_median + dsm_z_median)
+    shared_origin = np.array([anchor_xy[0], anchor_xy[1], anchor_z], dtype=np.float64)
+
+
     metrics = {
         "vertical_offset_applied": vertical_offset,
         "baseline": baseline_metrics,
@@ -257,16 +245,37 @@ def process_alignment(
         metrics["center_dsm_z"] = center_dsm_z
     if center_city_z is not None:
         metrics["center_city_z"] = center_city_z
+    metrics["gicp_anchor_origin"] = shared_origin.tolist()
 
     gicp_info = None
     transformed_points = shifted_points
 
     if run_gicp_flag:
-        ground_mask = xyz_city[:, 2] <= GROUND_THRESHOLD
-        if not np.any(ground_mask):
-            raise RuntimeError("Ground mask empty; adjust threshold before running GICP.")
-        source_for_gicp = shifted_points[ground_mask]
-        clouds = prepare_downsampled_clouds(source_for_gicp, dsm_subset)
+        # Select ground-like LiDAR points by comparing shifted LiDAR Z to nearest DSM Z
+        dsm_tree = cKDTree(dsm_subset[:, :2])
+        nn_dist, idx = dsm_tree.query(shifted_points[:, :2], k=1)
+        nn_dsm_z = dsm_subset[idx, 2]
+        vdiff_after_shift = nn_dsm_z - shifted_points[:, 2]
+
+        mask = np.abs(vdiff_after_shift) <= 1.0
+        if np.count_nonzero(mask) < 500:
+            mask = np.abs(vdiff_after_shift) <= 1.5
+        if np.count_nonzero(mask) < 500:
+            mask = np.abs(vdiff_after_shift) <= 2.5
+
+        if np.count_nonzero(mask) < 100:
+            # Fallback: take N points with smallest absolute vertical discrepancy
+            order = np.argsort(np.abs(vdiff_after_shift))
+            take = min(5000, max(1000, int(0.2 * len(order))))
+            sel_idx = order[:take]
+            source_for_gicp = shifted_points[sel_idx]
+        else:
+            source_for_gicp = shifted_points[mask]
+
+        if len(source_for_gicp) == 0:
+            raise RuntimeError("No suitable source points for GICP; check inputs or thresholds.")
+
+        clouds = prepare_downsampled_clouds(source_for_gicp, dsm_subset, shared_origin=shared_origin)
         gicp_result = run_gicp(clouds["source_centered"], clouds["target_centered"])
         gicp_transform = compose_transform(gicp_result, clouds["src_centroid"], clouds["tgt_centroid"])
         transformed_points = apply_transform(shifted_points, gicp_transform)
@@ -278,6 +287,7 @@ def process_alignment(
             "transform": gicp_transform.tolist(),
             "metrics": gicp_metrics,
             "horizontal_translation_m": float(np.linalg.norm(translation[:2])),
+            "gicp_source_points": int(len(source_for_gicp)),
         }
         save_parquet(lidar_df, transformed_points, outputs["shifted_gicp"])
         metrics["gicp"] = gicp_info
@@ -425,4 +435,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 

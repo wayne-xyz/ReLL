@@ -1,0 +1,1 @@
+veichel lidar and DSM , 3Dvs2.5D GICP, DSM only have one z-value per(x,y), v's lidar has many z value per(x,y)
