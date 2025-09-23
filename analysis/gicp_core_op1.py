@@ -92,6 +92,13 @@ def _gate_ground_like(
         sel_idx = np.nonzero(mask)[0]
 
     diagnostics["preselection_final_kept"] = int(sel_idx.size)
+    diagnostics["preselection_final_rejected"] = int(shifted_points.shape[0] - int(sel_idx.size))
+    # Z summary among kept source points
+    if sel_idx.size > 0:
+        z_kept = shifted_points[sel_idx, 2]
+        diagnostics["z_summary_kept"] = _summarize(z_kept)
+    else:
+        diagnostics["z_summary_kept"] = _summarize(np.array([]))
     return sel_idx, diagnostics
 
 
@@ -119,7 +126,10 @@ def _crop_and_gate_target_by_source(
     diagnostics: Dict[str, Any] = {
         "target_crop": {
             "xy_margin_m": float(xy_margin_m),
+            "original_dsm_count": int(dsm_points.shape[0]),
             "roi_count": int(dsm_roi.shape[0]),
+            "crop_kept_count": int(dsm_roi.shape[0]),
+            "crop_rejected_count": int(dsm_points.shape[0] - dsm_roi.shape[0]),
         }
     }
 
@@ -128,6 +138,8 @@ def _crop_and_gate_target_by_source(
         dsm_roi = dsm_points
         dsm_roi_idx = np.arange(dsm_points.shape[0])
         diagnostics["target_crop"]["roi_count"] = int(dsm_roi.shape[0])
+        diagnostics["target_crop"]["crop_kept_count"] = int(dsm_roi.shape[0])
+        diagnostics["target_crop"]["crop_rejected_count"] = 0
         diagnostics["target_crop"]["fallback_full_target"] = True
 
     # 2) Gate DSM by vertical consistency relative to nearest source point
@@ -155,6 +167,14 @@ def _crop_and_gate_target_by_source(
 
     sel_global_idx = dsm_roi_idx[sel_local_idx]
     diagnostics["target_gate"]["final_kept"] = int(sel_global_idx.size)
+    diagnostics["target_gate"]["final_rejected"] = int(dsm_roi.shape[0] - int(sel_local_idx.size))
+    diagnostics["target_gate"]["kept_by_gate_count"] = int(num_mask)
+    diagnostics["target_gate"]["rejected_by_gate_count"] = int(dsm_roi.shape[0] - num_mask)
+    if sel_local_idx.size > 0:
+        z_kept = dsm_roi[sel_local_idx, 2]
+        diagnostics["target_gate"]["z_summary_kept"] = _summarize(z_kept)
+    else:
+        diagnostics["target_gate"]["z_summary_kept"] = _summarize(np.array([]))
     return sel_global_idx, diagnostics
 
 
@@ -281,6 +301,39 @@ def register_with_roi_and_post_correction(
         "nn_xy_dist_summary_after_final": _summarize(nn_xy),
         "selected_source_points": int(source_for_gicp.shape[0]),
     }
+
+    # Add readable counts overview
+    try:
+        source_total = int(shifted_points.shape[0])
+        source_kept_by_gate = int(gate_diag.get("preselection_kept_by_gate", 0))
+        source_final_kept = int(gate_diag.get("preselection_final_kept", 0))
+        source_final_rejected = int(gate_diag.get("preselection_final_rejected", max(0, source_total - source_final_kept)))
+
+        tgt_crop = (tgt_diag.get("target_crop") or {})
+        tgt_gate = (tgt_diag.get("target_gate") or {})
+        target_original = int(tgt_crop.get("original_dsm_count", 0))
+        target_after_crop = int(tgt_crop.get("roi_count", 0))
+        target_crop_rejected = int(tgt_crop.get("crop_rejected_count", max(0, target_original - target_after_crop)))
+        target_kept_by_gate = int(tgt_gate.get("preselection_kept_by_gate", 0))
+        target_final_kept = int(tgt_gate.get("final_kept", 0))
+        target_final_rejected = int(tgt_gate.get("final_rejected", max(0, target_after_crop - target_final_kept)))
+
+        diagnostics["readable_counts"] = {
+            "source_original_count": source_total,
+            "source_kept_by_gate_count": source_kept_by_gate,
+            "source_rejected_by_gate_count": int(source_total - source_kept_by_gate),
+            "source_final_kept_count": source_final_kept,
+            "source_final_rejected_count": source_final_rejected,
+            "target_original_count": target_original,
+            "target_after_crop_count": target_after_crop,
+            "target_crop_rejected_count": target_crop_rejected,
+            "target_kept_by_gate_count": target_kept_by_gate,
+            "target_rejected_by_gate_count": int(max(0, target_after_crop - target_kept_by_gate)),
+            "target_final_kept_count": target_final_kept,
+            "target_final_rejected_count": target_final_rejected,
+        }
+    except Exception:
+        pass
 
     return {
         "transform": T_final,

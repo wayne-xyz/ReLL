@@ -397,12 +397,48 @@ def launch_gui():
             metrics_path = result["outputs"]["metrics_json"]
             shift_path = result["outputs"]["shifted"]
             gicp_path = result["outputs"].get("shifted_gicp")
+            gicp_info = result.get("gicp_info")
             msg = [
                 f"Metrics saved to: {metrics_path}",
                 f"Shifted cloud: {shift_path}",
             ]
             if gicp_path:
                 msg.append(f"Shifted + GICP cloud: {gicp_path}")
+            # Print op1 gating logs if available
+            try:
+                diag = (gicp_info or {}).get("diagnostics") or {}
+                roi = diag.get("roi") or {}
+                tgt = diag.get("target") or {}
+                counts = diag.get("readable_counts") or {}
+                if roi:
+                    msg.append(
+                        "Source gate: kept={} rejected={} z(p50)={:.3f}".format(
+                            roi.get("preselection_final_kept"),
+                            roi.get("preselection_final_rejected"),
+                            (roi.get("z_summary_kept") or {}).get("p50", float("nan")),
+                        )
+                    )
+                if tgt:
+                    tgt_gate = tgt.get("target_gate") or {}
+                    msg.append(
+                        "Target gate: kept={} rejected={} z(p50)={:.3f}".format(
+                            tgt_gate.get("final_kept"),
+                            tgt_gate.get("final_rejected"),
+                            (tgt_gate.get("z_summary_kept") or {}).get("p50", float("nan")),
+                        )
+                    )
+                if counts:
+                    msg.append(
+                        "Counts: src_orig={} src_kept={} tgt_orig={} tgt_crop={} tgt_kept={}".format(
+                            counts.get("source_original_count"),
+                            counts.get("source_final_kept_count"),
+                            counts.get("target_original_count"),
+                            counts.get("target_after_crop_count"),
+                            counts.get("target_final_kept_count"),
+                        )
+                    )
+            except Exception:
+                pass
             messagebox.showinfo("Completed", "\n".join(msg))
         except Exception as exc:  # pragma: no cover
             messagebox.showerror("Error", str(exc))
