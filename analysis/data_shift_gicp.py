@@ -10,13 +10,24 @@ import open3d as o3d
 import pandas as pd
 from scipy.spatial import cKDTree
 
-from .gicp_core import (
-    GICPParams,
-    prepare_downsampled_clouds as core_prepare_downsampled_clouds,
-    run_gicp as core_run_gicp,
-    compose_transform as core_compose_transform,
-    apply_transform as core_apply_transform,
-)
+try:
+    from .gicp_core import (
+        GICPParams,
+        prepare_downsampled_clouds as core_prepare_downsampled_clouds,
+        run_gicp as core_run_gicp,
+        compose_transform as core_compose_transform,
+        apply_transform as core_apply_transform,
+    )
+    from .gicp_core_op1 import register_with_roi_and_post_correction as op1_register
+except ImportError:
+    from gicp_core import (
+        GICPParams,
+        prepare_downsampled_clouds as core_prepare_downsampled_clouds,
+        run_gicp as core_run_gicp,
+        compose_transform as core_compose_transform,
+        apply_transform as core_apply_transform,
+    )
+    from gicp_core_op1 import register_with_roi_and_post_correction as op1_register
 
 VOXEL_SIZE = 0.5
 NORMAL_RADIUS = 2.0  # legacy: no longer used for normal estimation
@@ -187,6 +198,7 @@ def process_alignment(
     dsm_path: Path,
     output_dir: Path,
     run_gicp_flag: bool = True,
+    gicp_strategy: str = "core",
 ) -> dict:
     meta, lidar_df, xyz_city, utm_e, utm_n, dsm_subset = load_inputs(lidar_path, meta_path, dsm_path)
 
@@ -251,46 +263,64 @@ def process_alignment(
     transformed_points = shifted_points
 
     if run_gicp_flag:
-        # Select ground-like LiDAR points by comparing shifted LiDAR Z to nearest DSM Z
-        dsm_tree = cKDTree(dsm_subset[:, :2])
-        nn_dist, idx = dsm_tree.query(shifted_points[:, :2], k=1)
-        nn_dsm_z = dsm_subset[idx, 2]
-        vdiff_after_shift = nn_dsm_z - shifted_points[:, 2]
-
-        mask = np.abs(vdiff_after_shift) <= 1.0
-        if np.count_nonzero(mask) < 500:
-            mask = np.abs(vdiff_after_shift) <= 1.5
-        if np.count_nonzero(mask) < 500:
-            mask = np.abs(vdiff_after_shift) <= 2.5
-
-        if np.count_nonzero(mask) < 100:
-            # Fallback: take N points with smallest absolute vertical discrepancy
-            order = np.argsort(np.abs(vdiff_after_shift))
-            take = min(5000, max(1000, int(0.2 * len(order))))
-            sel_idx = order[:take]
-            source_for_gicp = shifted_points[sel_idx]
+        if gicp_strategy == "op1":
+            op1_result = op1_register(shifted_points, dsm_subset, shared_origin=shared_origin, config=None)
+            gicp_transform = np.asarray(op1_result["transform"], dtype=float)
+            transformed_points = apply_transform(shifted_points, gicp_transform)
+            gicp_metrics, _ = evaluate(transformed_points, dsm_subset)
+            translation = gicp_transform[:3, 3]
+            gicp_info = {
+                "strategy": "op1",
+                "transform": gicp_transform.tolist(),
+                "metrics": gicp_metrics,
+                "horizontal_translation_m": float(np.linalg.norm(translation[:2])),
+                "selected_source_points": int(op1_result.get("selected_source_points", 0)),
+                "diagnostics": op1_result.get("diagnostics", {}),
+            }
+            save_parquet(lidar_df, transformed_points, outputs["shifted_gicp"])
+            metrics["gicp"] = gicp_info
         else:
-            source_for_gicp = shifted_points[mask]
+            # Default core strategy
+            # Select ground-like LiDAR points by comparing shifted LiDAR Z to nearest DSM Z
+            dsm_tree = cKDTree(dsm_subset[:, :2])
+            nn_dist, idx = dsm_tree.query(shifted_points[:, :2], k=1)
+            nn_dsm_z = dsm_subset[idx, 2]
+            vdiff_after_shift = nn_dsm_z - shifted_points[:, 2]
 
-        if len(source_for_gicp) == 0:
-            raise RuntimeError("No suitable source points for GICP; check inputs or thresholds.")
+            mask = np.abs(vdiff_after_shift) <= 1.0
+            if np.count_nonzero(mask) < 500:
+                mask = np.abs(vdiff_after_shift) <= 1.5
+            if np.count_nonzero(mask) < 500:
+                mask = np.abs(vdiff_after_shift) <= 2.5
 
-        clouds = prepare_downsampled_clouds(source_for_gicp, dsm_subset, shared_origin=shared_origin)
-        gicp_result = run_gicp(clouds["source_centered"], clouds["target_centered"])
-        gicp_transform = compose_transform(gicp_result, clouds["src_centroid"], clouds["tgt_centroid"])
-        transformed_points = apply_transform(shifted_points, gicp_transform)
-        gicp_metrics, _ = evaluate(transformed_points, dsm_subset)
-        translation = gicp_transform[:3, 3]
-        gicp_info = {
-            "registration_fitness": float(gicp_result.fitness),
-            "registration_rmse": float(gicp_result.inlier_rmse),
-            "transform": gicp_transform.tolist(),
-            "metrics": gicp_metrics,
-            "horizontal_translation_m": float(np.linalg.norm(translation[:2])),
-            "gicp_source_points": int(len(source_for_gicp)),
-        }
-        save_parquet(lidar_df, transformed_points, outputs["shifted_gicp"])
-        metrics["gicp"] = gicp_info
+            if np.count_nonzero(mask) < 100:
+                order = np.argsort(np.abs(vdiff_after_shift))
+                take = min(5000, max(1000, int(0.2 * len(order))))
+                sel_idx = order[:take]
+                source_for_gicp = shifted_points[sel_idx]
+            else:
+                source_for_gicp = shifted_points[mask]
+
+            if len(source_for_gicp) == 0:
+                raise RuntimeError("No suitable source points for GICP; check inputs or thresholds.")
+
+            clouds = prepare_downsampled_clouds(source_for_gicp, dsm_subset, shared_origin=shared_origin)
+            gicp_result = run_gicp(clouds["source_centered"], clouds["target_centered"])
+            gicp_transform = compose_transform(gicp_result, clouds["src_centroid"], clouds["tgt_centroid"])
+            transformed_points = apply_transform(shifted_points, gicp_transform)
+            gicp_metrics, _ = evaluate(transformed_points, dsm_subset)
+            translation = gicp_transform[:3, 3]
+            gicp_info = {
+                "strategy": "core",
+                "registration_fitness": float(gicp_result.fitness),
+                "registration_rmse": float(gicp_result.inlier_rmse),
+                "transform": gicp_transform.tolist(),
+                "metrics": gicp_metrics,
+                "horizontal_translation_m": float(np.linalg.norm(translation[:2])),
+                "gicp_source_points": int(len(source_for_gicp)),
+            }
+            save_parquet(lidar_df, transformed_points, outputs["shifted_gicp"])
+            metrics["gicp"] = gicp_info
     else:
         metrics["gicp"] = None
         outputs["shifted_gicp"] = None
@@ -316,6 +346,7 @@ def launch_gui():
         "meta": tk.StringVar(),
         "dsm": tk.StringVar(),
         "output": tk.StringVar(value=str(Path.cwd() / "analysis")),
+        "strategy": tk.StringVar(value="op1"),
     }
 
     def browse_file(kind: str, filetypes):
@@ -336,6 +367,7 @@ def launch_gui():
             meta_value = path_vars["meta"].get().strip()
             dsm_value = path_vars["dsm"].get().strip()
             output_value = path_vars["output"].get().strip()
+            strategy_value = path_vars["strategy"].get().strip() or "core"
 
             if not lidar_value:
                 raise FileNotFoundError("Please select a LiDAR parquet file.")
@@ -354,7 +386,14 @@ def launch_gui():
             if meta_path is not None and not meta_path.is_file():
                 raise FileNotFoundError(f"Metadata parquet not found: {meta_path}")
 
-            result = process_alignment(lidar_path, meta_path, dsm_path, output_dir, run_gicp_flag=True)
+            result = process_alignment(
+                lidar_path,
+                meta_path,
+                dsm_path,
+                output_dir,
+                run_gicp_flag=True,
+                gicp_strategy=strategy_value,
+            )
             metrics_path = result["outputs"]["metrics_json"]
             shift_path = result["outputs"]["shifted"]
             gicp_path = result["outputs"].get("shifted_gicp")
@@ -372,20 +411,28 @@ def launch_gui():
         "meta": "Metadata parquet (optional)",
         "dsm": "DSM LAZ",
         "output": "Output directory",
+        "strategy": "GICP strategy",
     }
 
-    for idx, key in enumerate(["lidar", "meta", "dsm", "output"]):
+    for idx, key in enumerate(["lidar", "meta", "dsm", "output", "strategy"]):
         tk.Label(root, text=labels[key]).grid(row=idx, column=0, sticky="w", padx=6, pady=4)
-        entry = tk.Entry(root, textvariable=path_vars[key], width=60)
-        entry.grid(row=idx, column=1, padx=6, pady=4)
-        if key == "output":
-            button = tk.Button(root, text="Browse", command=browse_dir)
+        if key == "strategy":
+            options = ["core", "op1"]
+            om = tk.OptionMenu(root, path_vars[key], *options)
+            om.config(width=20)
+            om.grid(row=idx, column=1, padx=6, pady=4, sticky="w")
+            button = tk.Label(root, text=" ")
         else:
-            ft = [("Parquet", "*.parquet")] if key != "dsm" else [("LAS/LAZ", "*.las *.laz"), ("All", "*.*")]
-            button = tk.Button(root, text="Browse", command=lambda k=key, f=ft: browse_file(k, f))
+            entry = tk.Entry(root, textvariable=path_vars[key], width=60)
+            entry.grid(row=idx, column=1, padx=6, pady=4)
+            if key == "output":
+                button = tk.Button(root, text="Browse", command=browse_dir)
+            else:
+                ft = [("Parquet", "*.parquet")] if key != "dsm" else [("LAS/LAZ", "*.las *.laz"), ("All", "*.*")]
+                button = tk.Button(root, text="Browse", command=lambda k=key, f=ft: browse_file(k, f))
         button.grid(row=idx, column=2, padx=6, pady=4)
 
-    tk.Button(root, text="Run", command=run_processing).grid(row=4, column=0, columnspan=3, pady=12)
+    tk.Button(root, text="Run", command=run_processing).grid(row=5, column=0, columnspan=3, pady=12)
     root.mainloop()
 
 
@@ -396,6 +443,7 @@ def parse_args():
     parser.add_argument("--dsm", type=Path, help="Path to DSM LAS/LAZ file")
     parser.add_argument("--output-dir", type=Path, help="Directory for outputs")
     parser.add_argument("--skip-gicp", action="store_true", help="Skip the GICP refinement step")
+    parser.add_argument("--gicp-strategy", choices=["core", "op1"], default="op1", help="Choose GICP strategy: 'core' or 'op1'")
     parser.add_argument("--gui", action="store_true", help="Launch GUI even if paths are provided")
     return parser.parse_args()
 
@@ -418,7 +466,14 @@ def main():
         raise FileNotFoundError(f"Metadata parquet not found: {meta_path}")
 
     output_dir = args.output_dir or lidar_path.parent
-    result = process_alignment(lidar_path, meta_path, dsm_path, output_dir, run_gicp_flag=not args.skip_gicp)
+    result = process_alignment(
+        lidar_path,
+        meta_path,
+        dsm_path,
+        output_dir,
+        run_gicp_flag=not args.skip_gicp,
+        gicp_strategy=args.gicp_strategy,
+    )
     metrics = result["metrics"]
     metrics_path = result["outputs"]["metrics_json"]
     print("Metrics saved to:", metrics_path)
@@ -428,7 +483,12 @@ def main():
     gicp_path = result["outputs"].get("shifted_gicp")
     if gicp_info and gicp_path:
         print("Shifted + GICP cloud saved to:", gicp_path)
-        print("GICP fitness:", gicp_info["registration_fitness"], "RMSE:", gicp_info["registration_rmse"])
+        if "registration_fitness" in gicp_info:
+            print("GICP fitness:", gicp_info["registration_fitness"], "RMSE:", gicp_info["registration_rmse"])
+        else:
+            diag = (gicp_info.get("diagnostics") or {}).get("gicp") or {}
+            if diag:
+                print("GICP fitness:", diag.get("fitness"), "RMSE:", diag.get("rmse"))
         print("GICP horizontal translation (m):", gicp_info["horizontal_translation_m"])
     elif not args.skip_gicp:
         print("GICP output unavailable; see metrics file for details.")
