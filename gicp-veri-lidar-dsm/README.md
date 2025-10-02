@@ -11,26 +11,119 @@ A complete, user-friendly pipeline for aligning real-world LiDAR and DSM point c
 ✅ **Comprehensive Metrics** - JSON output with diagnostics and quality measures
 ✅ **Interactive Viewer** - Compare original, shifted, and aligned point clouds
 
+## Table of Contents
+
+- [Key Features](#key-features)
+- [Pipeline Overview](#pipeline-overview)
+- [Required Files](#required-files)
+- [Dependencies](#dependencies)
+- [Quick Start](#quick-start)
+- [Workflow Details](#workflow-details)
+  - [Step 1: Data Preprocessing](#step-1-data-preprocessing)
+  - [Step 2: GICP Alignment](#step-2-gicp-alignment)
+  - [Step 3: Interactive Visualization](#step-3-interactive-visualization)
+- [GUI Features](#gui-features)
+- [File Structure](#file-structure)
+- [Parameters](#parameters)
+- [Expected Results](#expected-results)
+- [Troubleshooting](#troubleshooting)
+- [Understanding Transform Frames](#understanding-transform-frames)
+- [Color Legend](#color-legend)
+- [Tips & Best Practices](#tips--best-practices)
+- [Summary](#summary)
+
 ## Pipeline Overview
 
 **Three-step workflow:**
 
-1. **Preprocessing** (`preprocess_lidar_dsm.py`)
-   - Input: Raw LiDAR parquet + DSM LAZ/LAS
-   - Output: Vertically shifted LiDAR + Extracted DSM
-   - Purpose: Align vertically and crop to matching coverage
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  STEP 1: PREPROCESSING                                          │
+│  Script: preprocess_lidar_dsm.py                                │
+├─────────────────────────────────────────────────────────────────┤
+│  Inputs:                                                        │
+│    • data3_utm.parquet (LiDAR point cloud)                      │
+│    • data3_dsm_utm.laz (DSM surface)                            │
+│                                                                 │
+│  Operations:                                                    │
+│    1. Vertical shift: Align LiDAR Z to DSM at center point     │
+│    2. DSM extraction: Crop DSM to LiDAR coverage (0.5m)         │
+│                                                                 │
+│  Outputs:                                                       │
+│    • lidar_shifted.parquet                                      │
+│    • dsm_extracted.parquet                                      │
+│    • preprocessing_metrics.json                                 │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  STEP 2: GICP ALIGNMENT                                         │
+│  Script: align_lidar_dsm.py                                     │
+├─────────────────────────────────────────────────────────────────┤
+│  Inputs:                                                        │
+│    • lidar_shifted.parquet                                      │
+│    • data3_meta.parquet (center coordinates)                    │
+│    • dsm_extracted.parquet                                      │
+│                                                                 │
+│  Operations:                                                    │
+│    1. Load center point from metadata                           │
+│    2. Run GICP in local frame (centered at metadata point)      │
+│    3. Compute transform matrices and quality metrics            │
+│                                                                 │
+│  Outputs:                                                       │
+│    • lidar_aligned.parquet                                      │
+│    • alignment_metrics.json                                     │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  STEP 3: VISUALIZATION                                          │
+│  Script: viewer.py                                              │
+├─────────────────────────────────────────────────────────────────┤
+│  Inputs (select any combination):                              │
+│    • data3_utm.parquet (original LiDAR - red)                   │
+│    • lidar_shifted.parquet (shifted - orange)                   │
+│    • lidar_aligned.parquet (aligned - green)                    │
+│    • data3_dsm_utm.laz (original DSM - blue)                    │
+│    • dsm_extracted.parquet (extracted - purple)                 │
+│                                                                 │
+│  Output:                                                        │
+│    • Interactive Open3D 3D viewer                               │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-2. **GICP Alignment** (`align_lidar_dsm.py`)
-   - Input: Shifted LiDAR + Metadata + Extracted DSM
-   - Output: GICP-aligned LiDAR + Transform metrics
-   - Purpose: Fine alignment using local coordinate frame
+## Required Files
 
-3. **Visualization** (`viewer.py`)
-   - Input: Any combination of processed files
-   - Output: Interactive 3D viewer
-   - Purpose: Visual verification of alignment quality
+Before starting, ensure you have these input files in the folder:
 
-## Workflow
+| File | Type | Description | Required For |
+|------|------|-------------|--------------|
+| `data3_utm.parquet` | LiDAR data | Point cloud with UTM coordinates | Preprocessing |
+| `data3_dsm_utm.laz` | DSM data | Digital Surface Model (LAZ/LAS format) | Preprocessing |
+| `data3_meta.parquet` | Metadata | Contains center coordinates for local frame | GICP Alignment |
+
+**Generated files** (created by the pipeline):
+- `lidar_shifted.parquet` - Vertically aligned LiDAR
+- `dsm_extracted.parquet` - Cropped DSM matching LiDAR coverage
+- `lidar_aligned.parquet` - Final GICP-aligned LiDAR
+- `preprocessing_metrics.json` - Diagnostics from step 1
+- `alignment_metrics.json` - GICP transform and quality metrics
+
+## Dependencies
+
+Install required Python packages:
+
+```bash
+pip install numpy pandas scipy laspy open3d
+```
+
+**Package versions:**
+- `numpy` - Array operations
+- `pandas` - Parquet file I/O
+- `scipy` - Spatial indexing (KDTree)
+- `laspy` - LAZ/LAS file reading
+- `open3d` - GICP and visualization
+- `tkinter` - GUI (usually included with Python)
+
+## Workflow Details
 
 ### Step 1: Data Preprocessing
 
@@ -315,12 +408,6 @@ For well-aligned data with ~100m×100m coverage:
 - Ensure preprocessing and alignment completed successfully
 - Files should exist: `lidar_shifted.parquet`, `dsm_extracted.parquet`, `lidar_aligned.parquet`
 
-## Dependencies
-
-```bash
-pip install numpy pandas scipy laspy open3d
-```
-
 ## Understanding Transform Frames
 
 This pipeline uses **local coordinate frames** for all transform calculations:
@@ -356,13 +443,48 @@ When using the viewer:
 | Blue | DSM Original |
 | Purple | DSM Extracted |
 
-## Tips
+## Tips & Best Practices
 
+**General Workflow:**
 - Start with default parameters, then tune if needed
-- Use the viewer to visually verify each step:
-  - Compare Original LiDAR (red) vs Original DSM (blue) → shows initial misalignment
-  - Compare Shifted LiDAR (orange) vs Extracted DSM (purple) → shows vertical alignment
-  - Compare Aligned LiDAR (green) vs Extracted DSM (purple) → shows final result
-- Check `preprocessing_metrics.json` for preprocessing stats
-- Check `alignment_metrics.json` for GICP quality metrics
-- Large translation errors (>2m) may indicate poor initial alignment or insufficient overlap
+- Always run the full pipeline in order: preprocess → align → visualize
+- Check metrics JSON files after each step to verify quality
+
+**Visual Verification:**
+Use the viewer to check alignment at each stage:
+- **Original LiDAR (red) vs Original DSM (blue)** → Shows initial misalignment (expect large Z offset)
+- **Shifted LiDAR (orange) vs Extracted DSM (purple)** → Shows vertical alignment (Z should match, XY may differ)
+- **Aligned LiDAR (green) vs Extracted DSM (purple)** → Shows final GICP result (should overlap closely)
+
+**Quality Checks:**
+- `preprocessing_metrics.json` - Check vertical shift amount (0-5m typical)
+- `alignment_metrics.json` - Check GICP fitness (>0.95 good), RMSE (<0.1m excellent)
+- Large translation errors (>2m in local frame) suggest poor initial alignment or insufficient overlap
+
+**Troubleshooting Tips:**
+- If GICP fails: Try increasing `--max-corr-dist` to 1.5-2.0m
+- If alignment is slow: Increase `--voxel-size` to 0.5m
+- If alignment is imprecise: Decrease `--voxel-size` to 0.2m
+- If DSM extraction removes too much: Increase `--max-distance` to 1.0m
+
+## Summary
+
+This pipeline provides a complete workflow for aligning LiDAR and DSM point clouds:
+
+1. **Easy to use** - GUI mode requires no command-line knowledge
+2. **Robust** - Handles vertical misalignment and varying coverage
+3. **Accurate** - Uses metadata center for consistent local frame transforms
+4. **Transparent** - Comprehensive metrics and visual verification tools
+5. **Flexible** - All parameters are adjustable via GUI or command line
+
+**Typical workflow time:**
+- Preprocessing: 1-2 minutes (depends on point count)
+- GICP Alignment: 2-5 minutes (depends on voxel size and point density)
+- Visualization: Instant
+
+**Expected accuracy:**
+- Vertical alignment: <0.5m error
+- GICP alignment: <0.1m RMSE for well-aligned data
+- Transform precision: Sub-millimeter in local frame
+
+For questions or issues, check the [Troubleshooting](#troubleshooting) section or verify your input files match the [Required Files](#required-files) specification.
