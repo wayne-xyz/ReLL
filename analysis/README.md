@@ -28,7 +28,12 @@ The scripts in this directory convert raw LiDAR sweeps and DSM tiles into an ali
 At this point, the LiDAR and DSM clouds are aligned well enough for visual inspection. The vertical shift is also what drives the gating preview in pointcloud_viewer.py when the GICP dependencies are available.
 
 ## Stage 2 – GICP Refinement
-The optional refinement (`--gicp-strategy op1` by default) is implemented in `gicp_core_op1.py` and invoked by `process_alignment`.
+The optional refinement supports multiple strategies via `--gicp-strategy`:
+- **op1** (default): Vertical gating with downsampling, implemented in `gicp_core_op1.py`
+- **op2**: DSM-style filtering with no downsampling, implemented in `gicp_core_op2.py`
+- **core**: Baseline Open3D GICP without gating
+
+### Op1 Strategy – Vertical Gating with Downsampling
 
 **Key parameters (Op1Config defaults)**
 - `vertical_gate_m = 0.5`: absolute |dz| tolerance when comparing LiDAR Z to the nearest DSM Z.
@@ -62,10 +67,45 @@ The optional refinement (`--gicp-strategy op1` by default) is implemented in `gi
    - Apply the final transform to the shifted LiDAR cloud (`<name>_shifted_gicp.parquet`).
    - Persist metrics (`_alignment_metrics.json`, `_alignment_results.npz`) including ICP fitness/RMSE, gate statistics, point counts, and post-correction summaries.
 
+### Op2 Strategy – DSM-Style Filtering without Downsampling
+
+**Key parameters (Op2Config defaults)**
+- `vertical_cell_size_m = 0.05`: horizontal grid cell size for extracting highest LiDAR points (mimics DSM structure).
+- `disable_downsampling = True`: skips voxel downsampling before GICP (uses filtered points directly).
+- `voxel_size = 0.5 m`, `normal_k = 20`, `max_corr_dist = 0.8 m`, `max_iter = 60`: ICP settings.
+
+**Workflow**
+1. **LiDAR DSM-style filtering** (`_extract_highest_per_vertical_cell`)
+   - Partition shifted LiDAR points into horizontal grid cells of size `vertical_cell_size_m`.
+   - For each cell, extract only the point with the maximum Z value (highest point).
+   - This mimics DSM topology by creating a pseudo-surface from the LiDAR data.
+   - Diagnostics include `original_count`, `filtered_count`, `cells_created`, and `reduction_ratio`.
+2. **Use full DSM**
+   - All DSM points are kept for GICP (no gating or cropping).
+   - This provides maximum surface coverage for registration.
+3. **No downsampling (default)**
+   - When `disable_downsampling = True`, skip voxel downsampling and use the filtered LiDAR and full DSM points directly.
+   - Normals are still estimated with `normal_k = 20`.
+4. **Generalized ICP** (`run_gicp`)
+   - Execute Open3D's GICP on the filtered LiDAR surface and full DSM.
+5. **Post-correction**
+   - Extract yaw + XY translation from GICP transform.
+   - Re-estimate Z translation using median `dz` after applying yaw+XY to guard against vertical drift.
+6. **Outputs and diagnostics**
+   - Apply final transform to shifted LiDAR cloud (`<name>_shifted_gicp.parquet`).
+   - Persist metrics including DSM-style filter statistics, ICP fitness/RMSE, and post-correction summaries.
+
+**When to use Op2**
+- When LiDAR data has dense vertical structure (e.g., buildings, vegetation) and you want to match DSM topology.
+- When you want to preserve the full DSM coverage without gating or cropping.
+- When surface-to-surface matching is preferred over ground-point selection.
+- When you prefer a simpler pipeline: filter LiDAR → GICP with full DSM.
+
 ## Visualisation
 pointcloud_viewer.py consumes the shifted or GICP-refined clouds:
 - It uses infer_lidar_points to reproduce the frame harmonisation.
-- When the gating helpers are importable, compute_gating_overlay re-runs the OP1 gating and displays kept vs rejected LiDAR/DSM points with distinct colours.
+- When the gating helpers are importable, compute_gating_overlay supports both Op1 and Op2 strategies and displays kept vs rejected LiDAR/DSM points with distinct colours.
+- The GUI includes a checkbox to toggle gating overlay and radio buttons to select between Op1 (vertical gate) and Op2 (DSM-style filter).
 - Without GICP dependencies, the viewer gracefully falls back to the basic two-colour rendering.
 
 ## Running the Pipeline
@@ -76,7 +116,10 @@ python analysis/data_shift_gicp.py \
   --dsm path/to/dsm.laz \
   --output-dir path/to/output
 `
-Add --skip-gicp to stop after the vertical shift or --gicp-strategy core to use the baseline Open3D implementation.
+Add `--skip-gicp` to stop after the vertical shift, or use `--gicp-strategy` to choose between:
+- `op1`: Vertical gating with downsampling (default)
+- `op2`: DSM-style filtering without downsampling
+- `core`: Baseline Open3D GICP implementation
 
 Launch the viewer directly or after alignment:
 `
@@ -84,10 +127,11 @@ python analysis/pointcloud_viewer.py --lidar path/to/lidar.parquet --dsm path/to
 `
 
 ## Key Files
-- data_shift_gicp.py: End-to-end alignment pipeline.
+- data_shift_gicp.py: End-to-end alignment pipeline with strategy selection.
 - gicp_core.py: Core Open3D GICP helpers.
-- gicp_core_op1.py: OP1 strategy with gating, cropping, and post-correction.
-- pointcloud_viewer.py: Open3D visualisation with gating overlays.
+- gicp_core_op1.py: Op1 strategy with vertical gating, downsampling, and post-correction.
+- gicp_core_op2.py: Op2 strategy with DSM-style filtering, no downsampling, and post-correction.
+- pointcloud_viewer.py: Open3D visualisation with gating overlays for both Op1 and Op2.
 
 
 

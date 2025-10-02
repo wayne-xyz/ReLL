@@ -19,6 +19,7 @@ try:
         apply_transform as core_apply_transform,
     )
     from .gicp_core_op1 import register_with_roi_and_post_correction as op1_register
+    from .gicp_core_op2 import register_with_dsm_style_filtering as op2_register
 except ImportError:
     from gicp_core import (
         GICPParams,
@@ -28,6 +29,7 @@ except ImportError:
         apply_transform as core_apply_transform,
     )
     from gicp_core_op1 import register_with_roi_and_post_correction as op1_register
+    from gicp_core_op2 import register_with_dsm_style_filtering as op2_register
 
 VOXEL_SIZE = 0.5
 NORMAL_RADIUS = 2.0  # legacy: no longer used for normal estimation
@@ -279,6 +281,22 @@ def process_alignment(
             }
             save_parquet(lidar_df, transformed_points, outputs["shifted_gicp"])
             metrics["gicp"] = gicp_info
+        elif gicp_strategy == "op2":
+            op2_result = op2_register(shifted_points, dsm_subset, shared_origin=shared_origin, config=None)
+            gicp_transform = np.asarray(op2_result["transform"], dtype=float)
+            transformed_points = apply_transform(shifted_points, gicp_transform)
+            gicp_metrics, _ = evaluate(transformed_points, dsm_subset)
+            translation = gicp_transform[:3, 3]
+            gicp_info = {
+                "strategy": "op2",
+                "transform": gicp_transform.tolist(),
+                "metrics": gicp_metrics,
+                "horizontal_translation_m": float(np.linalg.norm(translation[:2])),
+                "selected_source_points": int(op2_result.get("selected_source_points", 0)),
+                "diagnostics": op2_result.get("diagnostics", {}),
+            }
+            save_parquet(lidar_df, transformed_points, outputs["shifted_gicp"])
+            metrics["gicp"] = gicp_info
         else:
             # Default core strategy
             # Select ground-like LiDAR points by comparing shifted LiDAR Z to nearest DSM Z
@@ -453,7 +471,7 @@ def launch_gui():
     for idx, key in enumerate(["lidar", "meta", "dsm", "output", "strategy"]):
         tk.Label(root, text=labels[key]).grid(row=idx, column=0, sticky="w", padx=6, pady=4)
         if key == "strategy":
-            options = ["core", "op1"]
+            options = ["core", "op1", "op2"]
             om = tk.OptionMenu(root, path_vars[key], *options)
             om.config(width=20)
             om.grid(row=idx, column=1, padx=6, pady=4, sticky="w")
@@ -479,7 +497,7 @@ def parse_args():
     parser.add_argument("--dsm", type=Path, help="Path to DSM LAS/LAZ file")
     parser.add_argument("--output-dir", type=Path, help="Directory for outputs")
     parser.add_argument("--skip-gicp", action="store_true", help="Skip the GICP refinement step")
-    parser.add_argument("--gicp-strategy", choices=["core", "op1"], default="op1", help="Choose GICP strategy: 'core' or 'op1'")
+    parser.add_argument("--gicp-strategy", choices=["core", "op1", "op2"], default="op1", help="Choose GICP strategy: 'core', 'op1', or 'op2'")
     parser.add_argument("--gui", action="store_true", help="Launch GUI even if paths are provided")
     return parser.parse_args()
 

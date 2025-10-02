@@ -55,8 +55,13 @@ def prepare_downsampled_clouds(
     source_pc = build_cloud(src_local)
     target_pc = build_cloud(tgt_local)
 
-    source_down = source_pc.voxel_down_sample(params.voxel_size)
-    target_down = target_pc.voxel_down_sample(params.voxel_size)
+    # Skip downsampling if voxel_size is 0 or negative (disabled)
+    if params.voxel_size > 0:
+        source_down = source_pc.voxel_down_sample(params.voxel_size)
+        target_down = target_pc.voxel_down_sample(params.voxel_size)
+    else:
+        source_down = source_pc
+        target_down = target_pc
 
     if len(source_down.points) == 0 or len(target_down.points) == 0:
         raise RuntimeError("Downsampled cloud empty. Adjust voxel size or ground mask.")

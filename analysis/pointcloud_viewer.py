@@ -16,16 +16,20 @@ GATING_IMPORT_ERROR: Exception | None = None
 try:
     from .data_shift_gicp import evaluate, query_dsm_height
     from .gicp_core_op1 import Op1Config, _gate_ground_like, _crop_and_gate_target_by_source
+    from .gicp_core_op2 import Op2Config, _extract_highest_per_vertical_cell
 except Exception as exc_rel:
     try:
         from data_shift_gicp import evaluate, query_dsm_height
         from gicp_core_op1 import Op1Config, _gate_ground_like, _crop_and_gate_target_by_source
+        from gicp_core_op2 import Op2Config, _extract_highest_per_vertical_cell
     except Exception as exc_abs:
         evaluate = None
         query_dsm_height = None
         Op1Config = None
         _gate_ground_like = None
         _crop_and_gate_target_by_source = None
+        Op2Config = None
+        _extract_highest_per_vertical_cell = None
         GATING_IMPORT_ERROR = exc_abs
     else:
         GATING_IMPORT_ERROR = None if isinstance(exc_rel, ImportError) else exc_rel
@@ -200,18 +204,24 @@ def compute_gating_overlay(
     dsm_points: np.ndarray,
     meta_path: Path | None,
     lidar_info: dict[str, Any],
+    gating_strategy: str = "op1",
 ) -> dict[str, Any]:
-    """Derive gating masks and shifted LiDAR points using the OP1 thresholds."""
+    """Derive gating masks and shifted LiDAR points using the specified strategy (op1 or op2)."""
 
-    if (
-        evaluate is None
-        or query_dsm_height is None
-        or Op1Config is None
-        or _gate_ground_like is None
-        or _crop_and_gate_target_by_source is None
-    ):
+    if evaluate is None or query_dsm_height is None:
         detail = f"{GATING_IMPORT_ERROR}" if GATING_IMPORT_ERROR else "missing gating helpers"
         raise ValueError(f"Gating helpers unavailable: {detail}")
+
+    if gating_strategy == "op1":
+        if Op1Config is None or _gate_ground_like is None or _crop_and_gate_target_by_source is None:
+            detail = f"{GATING_IMPORT_ERROR}" if GATING_IMPORT_ERROR else "missing op1 helpers"
+            raise ValueError(f"Op1 helpers unavailable: {detail}")
+    elif gating_strategy == "op2":
+        if Op2Config is None or _extract_highest_per_vertical_cell is None:
+            detail = f"{GATING_IMPORT_ERROR}" if GATING_IMPORT_ERROR else "missing op2 helpers"
+            raise ValueError(f"Op2 helpers unavailable: {detail}")
+    else:
+        raise ValueError(f"Unknown gating strategy: {gating_strategy}")
 
     frame_desc = str(lidar_info.get("frame") or "").lower()
     if "utm" not in frame_desc:
@@ -244,47 +254,84 @@ def compute_gating_overlay(
     shifted = lidar_points.copy()
     shifted[:, 2] += vertical_offset
 
-    cfg = Op1Config()
-    sel_idx, roi_diag = _gate_ground_like(
-        shifted,
-        dsm_points,
-        cfg.vertical_gate_m,
-        cfg.min_points_after_gate,
-        cfg.fallback_fraction,
-    )
-    if sel_idx.size == 0:
-        raise ValueError("Gating rejected all LiDAR points with current thresholds.")
-    lidar_mask = np.zeros(shifted.shape[0], dtype=bool)
-    lidar_mask[sel_idx] = True
+    if gating_strategy == "op1":
+        cfg = Op1Config()
+        sel_idx, roi_diag = _gate_ground_like(
+            shifted,
+            dsm_points,
+            cfg.vertical_gate_m,
+            cfg.min_points_after_gate,
+            cfg.fallback_fraction,
+        )
+        if sel_idx.size == 0:
+            raise ValueError("Gating rejected all LiDAR points with current thresholds.")
+        lidar_mask = np.zeros(shifted.shape[0], dtype=bool)
+        lidar_mask[sel_idx] = True
 
-    source_for_gicp = shifted[lidar_mask]
-    tgt_idx, tgt_diag = _crop_and_gate_target_by_source(
-        source_for_gicp,
-        dsm_points,
-        cfg.vertical_gate_m,
-        cfg.target_xy_margin_m,
-        cfg.target_min_points_after_gate,
-        cfg.fallback_fraction,
-    )
-    if tgt_idx.size == 0:
-        raise ValueError("Gating rejected all DSM points with current thresholds.")
-    dsm_mask = np.zeros(dsm_points.shape[0], dtype=bool)
-    dsm_mask[tgt_idx] = True
+        source_for_gicp = shifted[lidar_mask]
+        tgt_idx, tgt_diag = _crop_and_gate_target_by_source(
+            source_for_gicp,
+            dsm_points,
+            cfg.vertical_gate_m,
+            cfg.target_xy_margin_m,
+            cfg.target_min_points_after_gate,
+            cfg.fallback_fraction,
+        )
+        if tgt_idx.size == 0:
+            raise ValueError("Gating rejected all DSM points with current thresholds.")
+        dsm_mask = np.zeros(dsm_points.shape[0], dtype=bool)
+        dsm_mask[tgt_idx] = True
 
-    return {
-        "lidar_points": shifted,
-        "lidar_kept": shifted[lidar_mask],
-        "lidar_filtered": shifted[~lidar_mask],
-        "lidar_mask": lidar_mask,
-        "dsm_kept": dsm_points[dsm_mask],
-        "dsm_filtered": dsm_points[~dsm_mask],
-        "dsm_mask": dsm_mask,
-        "vertical_offset": vertical_offset,
-        "source_diag": roi_diag,
-        "target_diag": tgt_diag,
-        "baseline_metrics": baseline_metrics,
-        "config": cfg,
-    }
+        return {
+            "strategy": "op1",
+            "lidar_points": shifted,
+            "lidar_kept": shifted[lidar_mask],
+            "lidar_filtered": shifted[~lidar_mask],
+            "lidar_mask": lidar_mask,
+            "dsm_kept": dsm_points[dsm_mask],
+            "dsm_filtered": dsm_points[~dsm_mask],
+            "dsm_mask": dsm_mask,
+            "vertical_offset": vertical_offset,
+            "source_diag": roi_diag,
+            "target_diag": tgt_diag,
+            "baseline_metrics": baseline_metrics,
+            "config": cfg,
+        }
+    elif gating_strategy == "op2":
+        cfg = Op2Config()
+        # Extract highest LiDAR points per vertical cell (DSM-style)
+        lidar_filtered, kept_idx, filter_diag = _extract_highest_per_vertical_cell(
+            shifted,
+            cfg.vertical_cell_size_m,
+        )
+        if lidar_filtered.size == 0:
+            raise ValueError("DSM-style filtering rejected all LiDAR points.")
+
+        # Create mask for visualization
+        lidar_mask = np.zeros(shifted.shape[0], dtype=bool)
+        # Mark kept points using the returned indices
+        lidar_mask[kept_idx] = True
+
+        # Op2: Keep ALL DSM points (no gating)
+        dsm_mask = np.ones(dsm_points.shape[0], dtype=bool)
+
+        return {
+            "strategy": "op2",
+            "lidar_points": shifted,
+            "lidar_kept": lidar_filtered,
+            "lidar_filtered": shifted[~lidar_mask],
+            "lidar_mask": lidar_mask,
+            "dsm_kept": dsm_points,
+            "dsm_filtered": np.empty((0, 3)),  # No DSM points rejected in Op2
+            "dsm_mask": dsm_mask,
+            "vertical_offset": vertical_offset,
+            "source_diag": filter_diag,
+            "target_diag": {"dsm_all_kept": True, "final_kept": int(dsm_points.shape[0])},
+            "baseline_metrics": baseline_metrics,
+            "config": cfg,
+        }
+    else:
+        raise ValueError(f"Unknown gating strategy: {gating_strategy}")
 
 
 def visualize_points(
@@ -312,7 +359,7 @@ def visualize_points(
     o3d.visualization.draw_geometries(geometries)
 
 
-def run_viewer(lidar_path: Path, meta_path: Path | None, dsm_path: Path, show_gating: bool = True) -> None:
+def run_viewer(lidar_path: Path, meta_path: Path | None, dsm_path: Path, show_gating: bool = True, gating_strategy: str = "op1") -> None:
     lidar_pts, lidar_info = infer_lidar_points(lidar_path, meta_path)
     dsm_pts, dsm_info = load_dsm_points(dsm_path)
 
@@ -358,18 +405,29 @@ def run_viewer(lidar_path: Path, meta_path: Path | None, dsm_path: Path, show_ga
     gating_overlay = None
     if show_gating:
         try:
-            gating_overlay = compute_gating_overlay(lidar_pts, dsm_pts, meta_path, lidar_info)
+            gating_overlay = compute_gating_overlay(lidar_pts, dsm_pts, meta_path, lidar_info, gating_strategy=gating_strategy)
         except ValueError as exc:
             print(f"Gating overlay skipped: {exc}")
         except Exception as exc:
             print(f"Gating overlay failed: {exc}")
 
         if gating_overlay:
+            print(f"Gating strategy: {gating_overlay.get('strategy', 'unknown')}")
             print(f"Gating vertical offset applied: {gating_overlay['vertical_offset']:.3f} m")
             src_diag = gating_overlay["source_diag"]
-            src_kept = int(src_diag.get("preselection_final_kept", gating_overlay["lidar_kept"].shape[0]))
-            src_rejected = int(src_diag.get("preselection_final_rejected", gating_overlay["lidar_filtered"].shape[0]))
-            print(f"LiDAR gate -> kept {src_kept:,} | rejected {src_rejected:,}")
+
+            if gating_overlay.get("strategy") == "op2":
+                # Op2 uses DSM-style filtering
+                src_kept = int(src_diag.get("filtered_count", gating_overlay["lidar_kept"].shape[0]))
+                src_rejected = int(src_diag.get("original_count", 0) - src_kept)
+                reduction_ratio = src_diag.get("reduction_ratio", 0.0)
+                print(f"LiDAR DSM-style filter -> kept {src_kept:,} | rejected {src_rejected:,} | reduction ratio {reduction_ratio:.2%}")
+            else:
+                # Op1 uses vertical gating
+                src_kept = int(src_diag.get("preselection_final_kept", gating_overlay["lidar_kept"].shape[0]))
+                src_rejected = int(src_diag.get("preselection_final_rejected", gating_overlay["lidar_filtered"].shape[0]))
+                print(f"LiDAR gate -> kept {src_kept:,} | rejected {src_rejected:,}")
+
             tgt_diag = gating_overlay["target_diag"]
             tgt_gate = (tgt_diag.get("target_gate") or {})
             tgt_kept = int(tgt_gate.get("final_kept", gating_overlay["dsm_kept"].shape[0]))
@@ -396,6 +454,7 @@ def launch_gui() -> None:
     }
 
     show_gating_var = tk.BooleanVar(value=True)
+    gating_strategy_var = tk.StringVar(value="op1")
 
     def browse_file(var: tk.StringVar, filetypes) -> None:
         initialdir = Path(var.get() or Path.cwd())
@@ -411,7 +470,13 @@ def launch_gui() -> None:
             meta_path = Path(meta_value) if meta_value else None
             if not lidar_path.is_file() or not dsm_path.is_file():
                 raise FileNotFoundError("Select existing LiDAR parquet and DSM LAS/LAZ files.")
-            run_viewer(lidar_path, meta_path, dsm_path, show_gating=show_gating_var.get())
+            run_viewer(
+                lidar_path,
+                meta_path,
+                dsm_path,
+                show_gating=show_gating_var.get(),
+                gating_strategy=gating_strategy_var.get(),
+            )
         except Exception as exc:  # pragma: no cover
             messagebox.showerror("Error", str(exc))
 
@@ -427,7 +492,15 @@ def launch_gui() -> None:
         tk.Button(root, text="Browse", command=lambda v=path_vars[key], ft=filetypes: browse_file(v, ft)).grid(row=idx, column=2, padx=6, pady=4)
 
     tk.Checkbutton(root, text="Show gating overlay (color by kept/rejected)", variable=show_gating_var).grid(row=3, column=0, columnspan=3, pady=4)
-    tk.Button(root, text="View", command=run_view).grid(row=4, column=0, columnspan=3, pady=12)
+
+    # Strategy selection row
+    tk.Label(root, text="Gating strategy").grid(row=4, column=0, sticky="w", padx=6, pady=4)
+    strategy_frame = tk.Frame(root)
+    strategy_frame.grid(row=4, column=1, sticky="w", padx=6, pady=4)
+    tk.Radiobutton(strategy_frame, text="Op1 (vertical gate)", variable=gating_strategy_var, value="op1").pack(side=tk.LEFT, padx=5)
+    tk.Radiobutton(strategy_frame, text="Op2 (DSM-style filter)", variable=gating_strategy_var, value="op2").pack(side=tk.LEFT, padx=5)
+
+    tk.Button(root, text="View", command=run_view).grid(row=5, column=0, columnspan=3, pady=12)
     root.mainloop()
 
 
