@@ -78,8 +78,9 @@ The optional refinement supports multiple strategies via `--gicp-strategy`:
 1. **LiDAR DSM-style filtering** (`_extract_highest_per_vertical_cell`)
    - Partition shifted LiDAR points into horizontal grid cells of size `vertical_cell_size_m`.
    - For each cell, extract only the point with the maximum Z value (highest point).
+   - Cell bookkeeping now relies on lexicographic sorting with 64-bit indices, so even 100 m crops keep each bin independent without overflow.
    - This mimics DSM topology by creating a pseudo-surface from the LiDAR data.
-   - Diagnostics include `original_count`, `filtered_count`, `cells_created`, and `reduction_ratio`.
+   - Diagnostics include `original_count`, `filtered_count`, `cells_created`, `reduction_ratio`, and a pre-ICP centroid delta that should stay near zero when the two clouds share the same UTM frame.
 2. **Use full DSM**
    - All DSM points are kept for GICP (no gating or cropping).
    - This provides maximum surface coverage for registration.

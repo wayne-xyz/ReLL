@@ -56,7 +56,6 @@ class CloudViewer:
         self.scene_widget.scene = rendering.Open3DScene(self.window.renderer)
         self.scene_widget.scene.set_background([0.02, 0.02, 0.02, 1.0])
         self.scene_widget.enable_scene_caching(True)
-
         self.window.add_child(self.scene_widget)
 
         self.panel = gui.Vert(8.0, gui.Margins(12, 12, 12, 12))
@@ -95,9 +94,9 @@ class CloudViewer:
 
         for key in ("target", "source", "aligned"):
             row = gui.Horiz(8, gui.Margins(0, 0, 0, 0))
-            load_button = gui.Button(f"Reload {LABELS[key]}")
-            load_button.background_color = gui.Color(*COLORS[key], 1.0)
-            load_button.set_on_clicked(lambda k=key: self._load_from_config(k))
+            reload_button = gui.Button(f"Reload {LABELS[key]}")
+            reload_button.background_color = gui.Color(*COLORS[key], 1.0)
+            reload_button.set_on_clicked(lambda k=key: self._load_from_config(k))
 
             checkbox = gui.Checkbox(f"Show {LABELS[key]}")
             checkbox.checked = False
@@ -105,7 +104,7 @@ class CloudViewer:
 
             self.checkboxes[key] = checkbox
 
-            row.add_child(load_button)
+            row.add_child(reload_button)
             row.add_child(checkbox)
             self.panel.add_child(row)
 
@@ -188,21 +187,39 @@ class CloudViewer:
 
         self.checkboxes[key].checked = True
         self.scene_widget.scene.show_geometry(key, True)
-        self._update_camera()
+
+        # If this is the first visible cloud, frame it
+        visible_before = any(
+            self.checkboxes.get(other_key) and self.checkboxes[other_key].checked
+            for other_key in self.geometries
+            if other_key != key
+        )
+        if not visible_before:
+            self._update_camera(force=True)
 
     def _toggle_cloud(self, key: str, checked: bool) -> None:
         if key not in self.geometries:
             return
+
         self.scene_widget.scene.show_geometry(key, checked)
-        self._update_camera()
+
+        if checked:
+            return  # keep current view when turning layers on/off
+
+        # If we just hid the last visible cloud, keep axes visible but do not reset view
+        if not any(
+            self.checkboxes.get(other_key) and self.checkboxes[other_key].checked
+            for other_key in self.geometries
+        ):
+            self.scene_widget.scene.show_axes(True)
 
     def _reset_camera(self) -> None:
         self._update_camera(force=True)
 
     def _update_camera(self, force: bool = False) -> None:
         visible = [
-            geom for k, geom in self.geometries.items()
-            if self.checkboxes.get(k, None) and self.checkboxes[k].checked
+            geom for key, geom in self.geometries.items()
+            if self.checkboxes.get(key) and self.checkboxes[key].checked
         ]
         if not visible:
             if force:

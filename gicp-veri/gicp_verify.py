@@ -170,6 +170,17 @@ def build_transform(tx: float, ty: float, tz: float, roll: float, pitch: float, 
     return T
 
 
+
+def make_translation(tx: float, ty: float, tz: float) -> np.ndarray:
+    T = np.eye(4)
+    T[:3, 3] = [tx, ty, tz]
+    return T
+
+
+def make_translation_from_vec(vec: np.ndarray) -> np.ndarray:
+    return make_translation(float(vec[0]), float(vec[1]), float(vec[2]))
+
+
 def extract_yaw(R: np.ndarray) -> float:
     return math.atan2(R[1, 0], R[0, 0])
 
@@ -200,6 +211,7 @@ def summarize_nn_error(aligned: np.ndarray, target: np.ndarray) -> Tuple[float, 
     rmse = math.sqrt(sum(sq_errors) / len(sq_errors))
     mean_abs = sum(abs_errors) / len(abs_errors)
     return rmse, mean_abs
+
 
 
 def run_verification(target_path: Path, output_dir: Path, cfg: VerifyConfig, visualize: bool) -> Path:
@@ -238,11 +250,20 @@ def run_verification(target_path: Path, output_dir: Path, cfg: VerifyConfig, vis
 
     aligned_points = apply_transform(source_points, estimated_transform)
 
-    gt_transform = np.linalg.inv(offset_transform)
-    delta_transform = np.linalg.inv(estimated_transform) @ gt_transform
+    anchor_to_origin = make_translation(-float(anchor[0]), -float(anchor[1]), -float(anchor[2]))
+    origin_to_anchor = make_translation(float(anchor[0]), float(anchor[1]), float(anchor[2]))
 
-    translation_error = float(np.linalg.norm(delta_transform[:3, 3]))
-    yaw_error = math.degrees(abs(extract_yaw(delta_transform[:3, :3])))
+    # Convert estimated transform from global frame to local frame (centered at anchor)
+    estimated_transform_local = anchor_to_origin @ estimated_transform @ origin_to_anchor
+
+    # Ground truth transform in local frame is just the inverse of the offset
+    gt_transform_local = np.linalg.inv(offset_transform)
+
+    # Compute error in local frame
+    delta_transform_local = estimated_transform_local @ np.linalg.inv(gt_transform_local)
+
+    translation_error = float(np.linalg.norm(delta_transform_local[:3, 3]))
+    yaw_error = math.degrees(abs(extract_yaw(delta_transform_local[:3, :3])))
 
     rmse_to_target, mean_abs_to_target = summarize_nn_error(aligned_points, target_points)
 
@@ -276,25 +297,32 @@ def run_verification(target_path: Path, output_dir: Path, cfg: VerifyConfig, vis
             "utm_e": float(anchor[0]),
             "utm_n": float(anchor[1]),
             "z": float(anchor[2]),
+            "note": "All transforms below are in local frame centered at this anchor point",
         },
         "offset_applied": {
             "translation_m": [float(tx), float(ty), float(tz)],
             "rotation_deg": [float(roll_deg), float(pitch_deg), float(yaw_deg)],
-            "matrix_4x4": offset_transform.tolist(),
+            "transform_matrix_local_frame": offset_transform.tolist(),
+        },
+        "ground_truth_transform_local_frame": {
+            "matrix_4x4": gt_transform_local.tolist(),
+            "note": "Inverse of offset in local frame - what GICP should recover",
         },
         "gicp": {
             "fitness": float(getattr(result, "fitness", 0.0)),
             "rmse": float(getattr(result, "inlier_rmse", 0.0)),
-            "transform_matrix": estimated_transform.tolist(),
+            "estimated_transform_local_frame": estimated_transform_local.tolist(),
+            "estimated_transform_global_frame": estimated_transform.tolist(),
         },
         "alignment_quality": {
             "rmse_to_target_m": rmse_to_target,
             "mean_abs_distance_m": mean_abs_to_target,
         },
-        "transform_error": {
-            "matrix_4x4": delta_transform.tolist(),
+        "transform_error_local_frame": {
+            "delta_matrix_4x4": delta_transform_local.tolist(),
             "translation_error_m": translation_error,
             "yaw_error_deg": yaw_error,
+            "note": "Error between GICP estimated transform and ground truth (both in local frame)",
         },
         "outputs": {
             "target_reference": str(target_out),
