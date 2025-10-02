@@ -1,33 +1,22 @@
 """
-Interactive viewer for comparing LiDAR-DSM alignment results.
+Interactive viewer for comparing point cloud files.
 
-Allows selecting:
-- LiDAR: Original / Shifted / Aligned
-- DSM: Original / Extracted
+Allows selecting any two parquet files for comparison.
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 import open3d as o3d
 
-try:
-    import laspy
-    HAS_LASPY = True
-except ImportError:
-    HAS_LASPY = False
 
-
-# Color scheme
-COLOR_LIDAR_ORIGINAL = [1.0, 0.3, 0.3]      # Red
-COLOR_LIDAR_SHIFTED = [1.0, 0.6, 0.2]       # Orange
-COLOR_LIDAR_ALIGNED = [0.3, 0.8, 0.3]       # Green
-COLOR_DSM_ORIGINAL = [0.2, 0.5, 1.0]        # Blue
-COLOR_DSM_EXTRACTED = [0.5, 0.3, 1.0]       # Purple
+# Color scheme for two files
+COLOR_FILE_1 = [1.0, 0.3, 0.3]      # Red
+COLOR_FILE_2 = [0.2, 0.5, 1.0]      # Blue
 
 
 def load_parquet_points(path: Path) -> Optional[np.ndarray]:
@@ -58,28 +47,7 @@ def load_parquet_points(path: Path) -> Optional[np.ndarray]:
         return None
 
 
-def load_laz_points(path: Path) -> Optional[np.ndarray]:
-    """Load point cloud from LAZ/LAS file.
-
-    Returns:
-        Nx3 array or None if failed
-    """
-    if not HAS_LASPY:
-        print("Error: laspy not installed, cannot load LAZ/LAS files")
-        return None
-
-    try:
-        las = laspy.read(path)
-        points = np.column_stack([las.x, las.y, las.z]).astype(float)
-        print(f"Loaded {len(points):,} points from {path}")
-        return points
-
-    except Exception as e:
-        print(f"Error loading {path}: {e}")
-        return None
-
-
-def create_point_cloud(points: np.ndarray, color: List[float]) -> o3d.geometry.PointCloud:
+def create_point_cloud(points: np.ndarray, color: list[float]) -> o3d.geometry.PointCloud:
     """Create Open3D point cloud with uniform color.
 
     Args:
@@ -98,20 +66,15 @@ def create_point_cloud(points: np.ndarray, color: List[float]) -> o3d.geometry.P
 class ViewerGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("LiDAR-DSM Alignment Viewer")
+        self.root.title("Point Cloud Viewer")
 
         # File paths
-        self.lidar_original_path = Path("data3_utm.parquet")
-        self.lidar_shifted_path = Path("lidar_shifted.parquet")
-        self.lidar_aligned_path = Path("lidar_aligned.parquet")
-        self.dsm_original_path = Path("data3_dsm_utm.laz")
-        self.dsm_extracted_path = Path("dsm_extracted.parquet")
+        self.file1_path = tk.StringVar(value="")
+        self.file2_path = tk.StringVar(value="")
 
         # State
-        self.lidar_selection = tk.StringVar(value="shifted")
-        self.dsm_selection = tk.StringVar(value="extracted")
-        self.show_lidar = tk.BooleanVar(value=True)
-        self.show_dsm = tk.BooleanVar(value=True)
+        self.show_file1 = tk.BooleanVar(value=True)
+        self.show_file2 = tk.BooleanVar(value=True)
 
         self.create_widgets()
 
@@ -121,123 +84,106 @@ class ViewerGUI:
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
 
         # Title
-        title = ttk.Label(main_frame, text="LiDAR-DSM Alignment Viewer", font=("", 14, "bold"))
-        title.grid(row=0, column=0, columnspan=2, pady=10)
+        title = ttk.Label(main_frame, text="Point Cloud Viewer", font=("", 14, "bold"))
+        title.grid(row=0, column=0, columnspan=3, pady=10)
 
-        # LiDAR section
-        lidar_frame = ttk.LabelFrame(main_frame, text="LiDAR", padding="10")
-        lidar_frame.grid(row=1, column=0, padx=5, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
+        # File 1 section
+        file1_frame = ttk.LabelFrame(main_frame, text="File 1 (Red)", padding="10")
+        file1_frame.grid(row=1, column=0, columnspan=3, padx=5, pady=5, sticky=(tk.W, tk.E))
 
-        ttk.Checkbutton(lidar_frame, text="Show LiDAR", variable=self.show_lidar).grid(row=0, column=0, sticky=tk.W)
+        ttk.Checkbutton(file1_frame, text="Show File 1", variable=self.show_file1).grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        ttk.Entry(file1_frame, textvariable=self.file1_path, width=60).grid(row=1, column=0, padx=5, pady=5)
+        ttk.Button(file1_frame, text="Browse", command=self.browse_file1).grid(row=1, column=1, padx=5, pady=5)
 
-        ttk.Radiobutton(lidar_frame, text="Original (red)", variable=self.lidar_selection, value="original").grid(row=1, column=0, sticky=tk.W, padx=20)
-        ttk.Radiobutton(lidar_frame, text="Shifted (orange)", variable=self.lidar_selection, value="shifted").grid(row=2, column=0, sticky=tk.W, padx=20)
-        ttk.Radiobutton(lidar_frame, text="Aligned (green)", variable=self.lidar_selection, value="aligned").grid(row=3, column=0, sticky=tk.W, padx=20)
+        # File 2 section
+        file2_frame = ttk.LabelFrame(main_frame, text="File 2 (Blue)", padding="10")
+        file2_frame.grid(row=2, column=0, columnspan=3, padx=5, pady=5, sticky=(tk.W, tk.E))
 
-        # DSM section
-        dsm_frame = ttk.LabelFrame(main_frame, text="DSM", padding="10")
-        dsm_frame.grid(row=1, column=1, padx=5, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
-
-        ttk.Checkbutton(dsm_frame, text="Show DSM", variable=self.show_dsm).grid(row=0, column=0, sticky=tk.W)
-
-        ttk.Radiobutton(dsm_frame, text="Original (blue)", variable=self.dsm_selection, value="original").grid(row=1, column=0, sticky=tk.W, padx=20)
-        ttk.Radiobutton(dsm_frame, text="Extracted (purple)", variable=self.dsm_selection, value="extracted").grid(row=2, column=0, sticky=tk.W, padx=20)
-
-        # File paths display
-        paths_frame = ttk.LabelFrame(main_frame, text="File Paths", padding="10")
-        paths_frame.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky=(tk.W, tk.E))
-
-        paths_text = (
-            f"LiDAR Original: {self.lidar_original_path}\n"
-            f"LiDAR Shifted: {self.lidar_shifted_path}\n"
-            f"LiDAR Aligned: {self.lidar_aligned_path}\n"
-            f"DSM Original: {self.dsm_original_path}\n"
-            f"DSM Extracted: {self.dsm_extracted_path}"
-        )
-        ttk.Label(paths_frame, text=paths_text, font=("Courier", 9)).grid(row=0, column=0, sticky=tk.W)
-
-        # Buttons
-        button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=3, column=0, columnspan=2, pady=10)
-
-        ttk.Button(button_frame, text="View", command=self.view_clouds).grid(row=0, column=0, padx=5)
-        ttk.Button(button_frame, text="Exit", command=self.root.quit).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(file2_frame, text="Show File 2", variable=self.show_file2).grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        ttk.Entry(file2_frame, textvariable=self.file2_path, width=60).grid(row=1, column=0, padx=5, pady=5)
+        ttk.Button(file2_frame, text="Browse", command=self.browse_file2).grid(row=1, column=1, padx=5, pady=5)
 
         # Legend
         legend_frame = ttk.LabelFrame(main_frame, text="Color Legend", padding="10")
-        legend_frame.grid(row=4, column=0, columnspan=2, padx=5, pady=5, sticky=(tk.W, tk.E))
+        legend_frame.grid(row=3, column=0, columnspan=3, padx=5, pady=5, sticky=(tk.W, tk.E))
 
-        legend_text = (
-            "Red: LiDAR Original | Orange: LiDAR Shifted | Green: LiDAR Aligned\n"
-            "Blue: DSM Original | Purple: DSM Extracted"
+        legend_text = "Red: File 1  |  Blue: File 2"
+        ttk.Label(legend_frame, text=legend_text, font=("", 10)).grid(row=0, column=0)
+
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=4, column=0, columnspan=3, pady=10)
+
+        ttk.Button(button_frame, text="View", command=self.view_clouds, width=15).grid(row=0, column=0, padx=5)
+        ttk.Button(button_frame, text="Exit", command=self.root.quit, width=15).grid(row=0, column=1, padx=5)
+
+    def browse_file1(self):
+        """Browse for File 1."""
+        path = filedialog.askopenfilename(
+            title="Select Point Cloud File 1",
+            filetypes=[("Parquet Files", "*.parquet"), ("All Files", "*.*")],
+            initialdir=Path.cwd(),
         )
-        ttk.Label(legend_frame, text=legend_text, font=("", 9)).grid(row=0, column=0)
+        if path:
+            self.file1_path.set(path)
+
+    def browse_file2(self):
+        """Browse for File 2."""
+        path = filedialog.askopenfilename(
+            title="Select Point Cloud File 2",
+            filetypes=[("Parquet Files", "*.parquet"), ("All Files", "*.*")],
+            initialdir=Path.cwd(),
+        )
+        if path:
+            self.file2_path.set(path)
 
     def view_clouds(self):
         """Load and visualize selected point clouds."""
         geometries = []
 
-        # Load LiDAR
-        if self.show_lidar.get():
-            lidar_choice = self.lidar_selection.get()
+        # Load File 1
+        if self.show_file1.get():
+            file1_str = self.file1_path.get().strip()
+            if file1_str:
+                file1_path = Path(file1_str)
+                if file1_path.is_file():
+                    points = load_parquet_points(file1_path)
+                    if points is not None and points.size > 0:
+                        pc = create_point_cloud(points, COLOR_FILE_1)
+                        geometries.append(pc)
+                        print(f"Loaded File 1: {file1_path.name} ({len(points):,} points)")
+                    else:
+                        print(f"Warning: Could not load File 1: {file1_path}")
+                else:
+                    messagebox.showwarning("File Not Found", f"File 1 does not exist:\n{file1_path}")
 
-            if lidar_choice == "original":
-                points = load_parquet_points(self.lidar_original_path)
-                color = COLOR_LIDAR_ORIGINAL
-                name = "LiDAR Original"
-            elif lidar_choice == "shifted":
-                points = load_parquet_points(self.lidar_shifted_path)
-                color = COLOR_LIDAR_SHIFTED
-                name = "LiDAR Shifted"
-            elif lidar_choice == "aligned":
-                points = load_parquet_points(self.lidar_aligned_path)
-                color = COLOR_LIDAR_ALIGNED
-                name = "LiDAR Aligned"
-            else:
-                points = None
-                name = "Unknown"
-
-            if points is not None and points.size > 0:
-                pc = create_point_cloud(points, color)
-                geometries.append(pc)
-                print(f"Added {name}: {len(points):,} points")
-            else:
-                print(f"Warning: Could not load {name}")
-
-        # Load DSM
-        if self.show_dsm.get():
-            dsm_choice = self.dsm_selection.get()
-
-            if dsm_choice == "original":
-                points = load_laz_points(self.dsm_original_path)
-                color = COLOR_DSM_ORIGINAL
-                name = "DSM Original"
-            elif dsm_choice == "extracted":
-                points = load_parquet_points(self.dsm_extracted_path)
-                color = COLOR_DSM_EXTRACTED
-                name = "DSM Extracted"
-            else:
-                points = None
-                name = "Unknown"
-
-            if points is not None and points.size > 0:
-                pc = create_point_cloud(points, color)
-                geometries.append(pc)
-                print(f"Added {name}: {len(points):,} points")
-            else:
-                print(f"Warning: Could not load {name}")
+        # Load File 2
+        if self.show_file2.get():
+            file2_str = self.file2_path.get().strip()
+            if file2_str:
+                file2_path = Path(file2_str)
+                if file2_path.is_file():
+                    points = load_parquet_points(file2_path)
+                    if points is not None and points.size > 0:
+                        pc = create_point_cloud(points, COLOR_FILE_2)
+                        geometries.append(pc)
+                        print(f"Loaded File 2: {file2_path.name} ({len(points):,} points)")
+                    else:
+                        print(f"Warning: Could not load File 2: {file2_path}")
+                else:
+                    messagebox.showwarning("File Not Found", f"File 2 does not exist:\n{file2_path}")
 
         # Visualize
         if not geometries:
-            messagebox.showwarning("No Data", "No point clouds loaded. Check file paths and selections.")
+            messagebox.showwarning("No Data", "No point clouds loaded. Please select files and ensure they exist.")
             return
 
-        print(f"\nVisualizing {len(geometries)} point clouds...")
+        print(f"\nVisualizing {len(geometries)} point cloud(s)...")
         print("Close the viewer window to return to the GUI.\n")
 
         o3d.visualization.draw_geometries(
             geometries,
-            window_name="LiDAR-DSM Alignment Viewer",
+            window_name="Point Cloud Viewer",
             width=1200,
             height=800,
         )
