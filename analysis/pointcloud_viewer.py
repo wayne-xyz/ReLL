@@ -2,6 +2,7 @@
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
@@ -9,6 +10,32 @@ import laspy
 import numpy as np
 import open3d as o3d
 import pandas as pd
+
+GATING_IMPORT_ERROR: Exception | None = None
+
+try:
+    from .data_shift_gicp import evaluate, query_dsm_height
+    from .gicp_core_op1 import Op1Config, _gate_ground_like, _crop_and_gate_target_by_source
+except Exception as exc_rel:
+    try:
+        from data_shift_gicp import evaluate, query_dsm_height
+        from gicp_core_op1 import Op1Config, _gate_ground_like, _crop_and_gate_target_by_source
+    except Exception as exc_abs:
+        evaluate = None
+        query_dsm_height = None
+        Op1Config = None
+        _gate_ground_like = None
+        _crop_and_gate_target_by_source = None
+        GATING_IMPORT_ERROR = exc_abs
+    else:
+        GATING_IMPORT_ERROR = None if isinstance(exc_rel, ImportError) else exc_rel
+else:
+    GATING_IMPORT_ERROR = None
+
+LIDAR_KEEP_COLOR = (1.0, 0.25, 0.25)
+LIDAR_REJECT_COLOR = (0.6, 0.3, 0.3)
+DSM_KEEP_COLOR = (0.2, 0.8, 0.2)
+DSM_REJECT_COLOR = (0.3, 0.5, 0.35)
 
 
 def quat_to_rot(qw: float, qx: float, qy: float, qz: float) -> np.ndarray:
@@ -168,18 +195,124 @@ def create_o3d_cloud(points: np.ndarray, color: tuple[float, float, float]) -> o
     return cloud
 
 
-def visualize_points(lidar_points: np.ndarray, dsm_points: np.ndarray) -> None:
+def compute_gating_overlay(
+    lidar_points: np.ndarray,
+    dsm_points: np.ndarray,
+    meta_path: Path | None,
+    lidar_info: dict[str, Any],
+) -> dict[str, Any]:
+    """Derive gating masks and shifted LiDAR points using the OP1 thresholds."""
+
+    if (
+        evaluate is None
+        or query_dsm_height is None
+        or Op1Config is None
+        or _gate_ground_like is None
+        or _crop_and_gate_target_by_source is None
+    ):
+        detail = f"{GATING_IMPORT_ERROR}" if GATING_IMPORT_ERROR else "missing gating helpers"
+        raise ValueError(f"Gating helpers unavailable: {detail}")
+
+    frame_desc = str(lidar_info.get("frame") or "").lower()
+    if "utm" not in frame_desc:
+        raise ValueError("LiDAR points are not in a UTM frame; gating requires comparable coordinates.")
+    if lidar_points.size == 0:
+        raise ValueError("LiDAR dataset is empty.")
+    if dsm_points.size == 0:
+        raise ValueError("DSM dataset is empty.")
+
+    meta_row = None
+    if meta_path is not None:
+        meta_df = pd.read_parquet(meta_path)
+        if len(meta_df):
+            meta_row = meta_df.iloc[0]
+
+    baseline_metrics, baseline_vertical_diff = evaluate(lidar_points, dsm_points)
+    if meta_row is not None:
+        try:
+            center_e = float(meta_row["center_utm_easting_m"])
+            center_n = float(meta_row["center_utm_northing_m"])
+            center_city_z = float(meta_row["center_city_tz_m"])
+            center_dsm_z = query_dsm_height(dsm_points, center_e, center_n)
+            vertical_offset = center_dsm_z - center_city_z
+        except KeyError as exc:
+            print(f"Metadata missing {exc}; falling back to median vertical difference for vertical offset.")
+            vertical_offset = float(np.median(baseline_vertical_diff)) if baseline_vertical_diff.size else 0.0
+    else:
+        vertical_offset = float(np.median(baseline_vertical_diff)) if baseline_vertical_diff.size else 0.0
+
+    shifted = lidar_points.copy()
+    shifted[:, 2] += vertical_offset
+
+    cfg = Op1Config()
+    sel_idx, roi_diag = _gate_ground_like(
+        shifted,
+        dsm_points,
+        cfg.vertical_gate_m,
+        cfg.min_points_after_gate,
+        cfg.fallback_fraction,
+    )
+    if sel_idx.size == 0:
+        raise ValueError("Gating rejected all LiDAR points with current thresholds.")
+    lidar_mask = np.zeros(shifted.shape[0], dtype=bool)
+    lidar_mask[sel_idx] = True
+
+    source_for_gicp = shifted[lidar_mask]
+    tgt_idx, tgt_diag = _crop_and_gate_target_by_source(
+        source_for_gicp,
+        dsm_points,
+        cfg.vertical_gate_m,
+        cfg.target_xy_margin_m,
+        cfg.target_min_points_after_gate,
+        cfg.fallback_fraction,
+    )
+    if tgt_idx.size == 0:
+        raise ValueError("Gating rejected all DSM points with current thresholds.")
+    dsm_mask = np.zeros(dsm_points.shape[0], dtype=bool)
+    dsm_mask[tgt_idx] = True
+
+    return {
+        "lidar_points": shifted,
+        "lidar_kept": shifted[lidar_mask],
+        "lidar_filtered": shifted[~lidar_mask],
+        "lidar_mask": lidar_mask,
+        "dsm_kept": dsm_points[dsm_mask],
+        "dsm_filtered": dsm_points[~dsm_mask],
+        "dsm_mask": dsm_mask,
+        "vertical_offset": vertical_offset,
+        "source_diag": roi_diag,
+        "target_diag": tgt_diag,
+        "baseline_metrics": baseline_metrics,
+        "config": cfg,
+    }
+
+
+def visualize_points(
+    lidar_points: np.ndarray,
+    dsm_points: np.ndarray,
+    gating_overlay: dict[str, Any] | None = None,
+) -> None:
     geometries: list[o3d.geometry.Geometry] = []
-    if len(lidar_points):
-        geometries.append(create_o3d_cloud(lidar_points, (1.0, 0.2, 0.2)))
-    if len(dsm_points):
-        geometries.append(create_o3d_cloud(dsm_points, (0.2, 0.8, 0.2)))
+    if gating_overlay:
+        if gating_overlay["lidar_kept"].size:
+            geometries.append(create_o3d_cloud(gating_overlay["lidar_kept"], LIDAR_KEEP_COLOR))
+        if gating_overlay["lidar_filtered"].size:
+            geometries.append(create_o3d_cloud(gating_overlay["lidar_filtered"], LIDAR_REJECT_COLOR))
+        if gating_overlay["dsm_kept"].size:
+            geometries.append(create_o3d_cloud(gating_overlay["dsm_kept"], DSM_KEEP_COLOR))
+        if gating_overlay["dsm_filtered"].size:
+            geometries.append(create_o3d_cloud(gating_overlay["dsm_filtered"], DSM_REJECT_COLOR))
+    else:
+        if len(lidar_points):
+            geometries.append(create_o3d_cloud(lidar_points, LIDAR_KEEP_COLOR))
+        if len(dsm_points):
+            geometries.append(create_o3d_cloud(dsm_points, DSM_KEEP_COLOR))
     if not geometries:
         raise ValueError("No points available to visualize.")
     o3d.visualization.draw_geometries(geometries)
 
 
-def run_viewer(lidar_path: Path, meta_path: Path | None, dsm_path: Path) -> None:
+def run_viewer(lidar_path: Path, meta_path: Path | None, dsm_path: Path, show_gating: bool = True) -> None:
     lidar_pts, lidar_info = infer_lidar_points(lidar_path, meta_path)
     dsm_pts, dsm_info = load_dsm_points(dsm_path)
 
@@ -222,7 +355,34 @@ def run_viewer(lidar_path: Path, meta_path: Path | None, dsm_path: Path) -> None
     else:
         print("Insufficient information to compare spatial bounds.")
 
-    visualize_points(lidar_pts, dsm_pts)
+    gating_overlay = None
+    if show_gating:
+        try:
+            gating_overlay = compute_gating_overlay(lidar_pts, dsm_pts, meta_path, lidar_info)
+        except ValueError as exc:
+            print(f"Gating overlay skipped: {exc}")
+        except Exception as exc:
+            print(f"Gating overlay failed: {exc}")
+
+        if gating_overlay:
+            print(f"Gating vertical offset applied: {gating_overlay['vertical_offset']:.3f} m")
+            src_diag = gating_overlay["source_diag"]
+            src_kept = int(src_diag.get("preselection_final_kept", gating_overlay["lidar_kept"].shape[0]))
+            src_rejected = int(src_diag.get("preselection_final_rejected", gating_overlay["lidar_filtered"].shape[0]))
+            print(f"LiDAR gate -> kept {src_kept:,} | rejected {src_rejected:,}")
+            tgt_diag = gating_overlay["target_diag"]
+            tgt_gate = (tgt_diag.get("target_gate") or {})
+            tgt_kept = int(tgt_gate.get("final_kept", gating_overlay["dsm_kept"].shape[0]))
+            tgt_rejected = int(tgt_gate.get("final_rejected", gating_overlay["dsm_filtered"].shape[0]))
+            print(f"DSM gate -> kept {tgt_kept:,} | rejected {tgt_rejected:,}")
+            lidar_display = gating_overlay["lidar_points"]
+        else:
+            lidar_display = lidar_pts
+    else:
+        print("Gating overlay disabled; showing raw point clouds in base colors.")
+        lidar_display = lidar_pts
+
+    visualize_points(lidar_display, dsm_pts, gating_overlay)
 
 
 def launch_gui() -> None:
@@ -234,6 +394,8 @@ def launch_gui() -> None:
         "meta": tk.StringVar(),
         "dsm": tk.StringVar(),
     }
+
+    show_gating_var = tk.BooleanVar(value=True)
 
     def browse_file(var: tk.StringVar, filetypes) -> None:
         initialdir = Path(var.get() or Path.cwd())
@@ -249,7 +411,7 @@ def launch_gui() -> None:
             meta_path = Path(meta_value) if meta_value else None
             if not lidar_path.is_file() or not dsm_path.is_file():
                 raise FileNotFoundError("Select existing LiDAR parquet and DSM LAS/LAZ files.")
-            run_viewer(lidar_path, meta_path, dsm_path)
+            run_viewer(lidar_path, meta_path, dsm_path, show_gating=show_gating_var.get())
         except Exception as exc:  # pragma: no cover
             messagebox.showerror("Error", str(exc))
 
@@ -264,7 +426,8 @@ def launch_gui() -> None:
         tk.Entry(root, textvariable=path_vars[key], width=60).grid(row=idx, column=1, padx=6, pady=4)
         tk.Button(root, text="Browse", command=lambda v=path_vars[key], ft=filetypes: browse_file(v, ft)).grid(row=idx, column=2, padx=6, pady=4)
 
-    tk.Button(root, text="View", command=run_view).grid(row=3, column=0, columnspan=3, pady=12)
+    tk.Checkbutton(root, text="Show gating overlay (color by kept/rejected)", variable=show_gating_var).grid(row=3, column=0, columnspan=3, pady=4)
+    tk.Button(root, text="View", command=run_view).grid(row=4, column=0, columnspan=3, pady=12)
     root.mainloop()
 
 
