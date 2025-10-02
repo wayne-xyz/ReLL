@@ -1,0 +1,97 @@
+{
+  "inputs": {
+    "shifted_lidar": "lidar_shifted.parquet",
+    "meta_data": "data3_meta.parquet",
+    "extracted_dsm": "dsm_extracted.parquet",
+    "shifted_lidar_points": 494065,
+    "extracted_dsm_points": 185481
+  },
+  "local_frame_anchor_utm": {
+    "utm_e": 622122.3915693476,
+    "utm_n": 3348303.4481320796,
+    "z": -16.160409006346878,
+    "note": "Center point from metadata - all transforms below are in local frame centered at this anchor point"
+  },
+  "gicp_parameters": {
+    "voxel_size": 0.1,
+    "normal_k": 20,
+    "max_corr_dist": 0.8,
+    "max_iter": 60
+  },
+  "gicp_result": {
+    "fitness": 0.5493676790712139,
+    "inlier_rmse": 0.4252940036449328
+  },
+  "transform_local_frame": {
+    "matrix_4x4": [
+      [
+        0.9993301375762963,
+        -0.03605371349687818,
+        0.006277409881768552,
+        -0.39433273061877117
+      ],
+      [
+        0.036088571364521656,
+        0.9993332887908587,
+        -0.0055310877152790604,
+        0.8139574760571122
+      ],
+      [
+        -0.006073808410423222,
+        0.0057539254019589635,
+        0.9999649999844307,
+        2.1531910351586703
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "translation_m": [
+      -0.39433273061877117,
+      0.8139574760571122,
+      2.1531910351586703
+    ],
+    "yaw_deg": 2.06821008587348,
+    "note": "Transform in local frame (centered at anchor)"
+  },
+  "transform_global_frame": {
+    "matrix_4x4": [
+      [
+        0.9993301375762963,
+        -0.03605371349687818,
+        0.006277409881768552,
+        121135.21674540086
+      ],
+      [
+        0.036088571364521656,
+        0.9993332887908587,
+        -0.0055310877152790604,
+        -20218.43231230462
+      ],
+      [
+        -0.006073808410423222,
+        0.0057539254019589635,
+        0.9999649999844307,
+        -15485.083424026854
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "note": "Transform in global UTM frame (for applying to actual data)"
+  },
+  "alignment_quality": {
+    "rmse_to_target_m": 1.0566011286456003,
+    "mean_abs_distance_m": 0.8434761419113096
+  },
+  "outputs": {
+    "aligned_lidar": "lidar_aligned.parquet",
+    "metrics_json": "alignment_metrics.json"
+  }
+}
