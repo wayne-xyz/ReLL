@@ -1,0 +1,36 @@
+# Summary CSV files
+*_summary.csv
+pipeline_summary.csv
+pipeline_test_summary.csv
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Data directories (don't commit large data)
+temp_argoverse_download/
+processed_samples_*/
+../temp_argoverse_download/
+../processed_samples_*/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

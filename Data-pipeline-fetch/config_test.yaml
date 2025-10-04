@@ -1,0 +1,36 @@
+# Quick Test Configuration
+# Use this for testing with a small number of samples
+
+target_city: "ATX"
+sample_count: 1  # Just 2 samples for quick testing
+fetch_splits: ["val"]
+skip_existing_downloads: true
+skip_processed_logs: true  # Skip logs that already have output
+
+# Processing
+sweeps_per_segment: 5  # Small segments for testing (~0.5s at 10Hz)
+segment_overlap_sweeps: 0
+crop_size_meters: 100
+buffer_meters: 2.0  # Only used if crop_size_meters is null
+
+# Paths
+temp_download_dir: "../temp_argoverse_download"
+output_dir: "../processed_samples_austin_test"
+city_geoalign_root: "../Argoverse2-geoalign/ATX"
+s5cmd_path: "../ArgoverseLidar/s5cmd/s5cmd.exe"
+
+# S5cmd
+s5cmd_concurrency: 16
+s5cmd_part_size_mb: 128
+
+# Output
+compression: "zstd"
+output_file_prefix: "segment"
+
+# Logging
+enable_detailed_logging: true
+log_file: "pipeline_test"
+
+# Cleanup
+cleanup_after_processing: true
+cleanup_temp_dir_on_completion: true

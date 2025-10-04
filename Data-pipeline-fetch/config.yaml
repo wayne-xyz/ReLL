@@ -1,0 +1,127 @@
+# Data Pipeline Fetch Configuration
+# This configuration file controls the entire fetch-and-process pipeline
+
+# ===========================
+# Data Fetching Configuration
+# ===========================
+
+# Target city to download (currently only 'ATX' supported due to geo-align data availability)
+# Options: ATX (Austin, Texas)
+target_city: "ATX"
+
+# Sample count: how many samples to download
+# - Use a number (e.g., 5) to download specific number of samples
+# - Use "all" to download all available samples for the city
+# - Use a small number (1-5) for quick testing
+sample_count: 5
+
+# Data splits to fetch from (original Argoverse2 structure)
+# Even though we don't keep the division in output, we can choose which splits to fetch from
+# Options: ["train"], ["val"], ["test"], or combinations like ["train", "val"]
+# Note: Final output won't have train/val/test division - all will be merged
+fetch_splits:
+  - "val"
+
+# Skip downloading logs that already exist in temp directory
+skip_existing_downloads: true
+
+# Skip processing logs that already have output segments in output_dir
+# Checks for folders named {log_id}_* before downloading
+skip_processed_logs: true
+
+# ===========================
+# Data Processing Configuration
+# ===========================
+
+# Number of sweeps to include in each segment
+# At ~10Hz LiDAR frequency:
+#   5 sweeps ≈ 0.5 seconds
+#   10 sweeps ≈ 1.0 second
+#   50 sweeps ≈ 5.0 seconds
+# Duration is automatically calculated from actual timestamps (recorded in metadata)
+sweeps_per_segment: 5
+
+# Overlap between segments (in sweeps)
+# Set to 0 for no overlap (as requested)
+segment_overlap_sweeps: 0
+
+# Optional square crop size in meters (set to null for no cropping)
+# Minimum allowed: 32.0 meters
+# Recommended: 100.0 (default)
+# Example: 32.0, 64.0, 100.0, or null
+crop_size_meters: 100.0
+
+# Buffer around LiDAR footprint for imagery/DSM extraction (meters)
+# Only used if crop_size_meters is null
+# Note: Imagery resolution is auto-detected from source (no resampling)
+buffer_meters: 2.0
+
+# ===========================
+# Path Configuration
+# ===========================
+
+# Temporary directory for downloaded original data
+# This data will be deleted after processing (not saved)
+temp_download_dir: "../temp_argoverse_download"
+
+# Final output directory for processed samples
+# Each sample will be in a subfolder: {original_log_id}_{segment_index}
+output_dir: "../processed_samples_austin"
+
+# Path to Argoverse2-geoalign city data
+# This should contain Imagery/ and DSM/ subdirectories
+# Currently only Austin (ATX) data is available
+city_geoalign_root: "../Argoverse2-geoalign/ATX"
+
+# Path to s5cmd executable for downloading
+# Leave as default to use bundled s5cmd in ArgoverseLidar folder
+s5cmd_path: "../ArgoverseLidar/s5cmd/s5cmd.exe"
+
+# ===========================
+# S5cmd Download Configuration
+# ===========================
+
+# Concurrency level for s5cmd downloads
+# Higher values = faster but more network/CPU usage
+s5cmd_concurrency: 16
+
+# Multipart chunk size in MiB for s5cmd
+# Larger values may improve download speed for large files
+s5cmd_part_size_mb: 128
+
+# ===========================
+# Output Configuration
+# ===========================
+
+# Parquet compression codec
+# Options: "snappy", "gzip", "zstd", "lz4", "brotli"
+# "zstd" provides good compression ratio and speed
+compression: "zstd"
+
+# Naming prefix for output files within each sample folder
+# Files will be named: {prefix}.parquet, {prefix}_utm.parquet, {prefix}_meta.parquet, etc.
+output_file_prefix: "segment"
+
+# ===========================
+# Logging Configuration
+# ===========================
+
+# Enable detailed logging for each sample (console only)
+enable_detailed_logging: true
+
+# Summary log file name (saved as {output_dir}/{log_file}_summary.csv)
+# CSV contains: segment_name, output_path, point_count, duration, motion metrics
+# Updated incrementally after each segment (safe if pipeline crashes)
+# Set to null to skip summary file generation
+log_file: "pipeline"
+
+# ===========================
+# Cleanup Configuration
+# ===========================
+
+# Delete temporary downloaded data after processing each sample
+# Recommended: true (to save disk space)
+cleanup_after_processing: true
+
+# Delete entire temp directory after pipeline completes
+cleanup_temp_dir_on_completion: true
