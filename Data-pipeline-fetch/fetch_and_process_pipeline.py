@@ -33,7 +33,13 @@ import pandas as pd
 import yaml
 
 # Import local processing modules
-from lib import create_macro_sweep, run_stage_two
+from lib import (
+    create_macro_sweep,
+    run_stage_two,
+    extract_dsm_near_lidar,
+    align_lidar_to_dsm,
+    GICPParams,
+)
 
 # Argoverse2 S3 configuration
 BASE_URL = "https://s3.amazonaws.com/argoverse"
@@ -442,7 +448,7 @@ def process_log_segments(log_dir: Path, config: PipelineConfig,
             center_index = len(sweep_indices) // 2
 
             # Stage 1: Create macro sweep
-            logger.info(f"    [Stage 1/2] LiDAR Processing...")
+            logger.info(f"    [Stage 1/4] LiDAR Processing...")
             stage1_start = time.time()
             output_prefix = segment_output_dir / config.output_file_prefix
 
@@ -464,7 +470,7 @@ def process_log_segments(log_dir: Path, config: PipelineConfig,
             # Stage 2: Generate imagery and DSM
             stage2_elapsed = 0.0
             try:
-                logger.info(f"    [Stage 2/2] Imagery & DSM Processing...")
+                logger.info(f"    [Stage 2/4] Imagery & DSM Processing...")
                 stage2_start = time.time()
 
                 stage_two = run_stage_two(
@@ -490,6 +496,80 @@ def process_log_segments(log_dir: Path, config: PipelineConfig,
                 logger.warning(f"    ⚠ Continuing with LiDAR data only")
                 stage_two = None
 
+            # Stage 3: Extract DSM points near LiDAR
+            stage3_elapsed = 0.0
+            dsm_extraction = None
+            if stage_two is not None:
+                try:
+                    logger.info(f"    [Stage 3/4] DSM Extraction...")
+                    stage3_start = time.time()
+
+                    extracted_dsm_path = segment_output_dir / (config.output_file_prefix + "_extract_dsm_utm.parquet")
+                    dsm_extraction = extract_dsm_near_lidar(
+                        lidar_parquet_path=macro.utm_point_path,
+                        dsm_laz_path=stage_two.laz_path,
+                        output_path=extracted_dsm_path,
+                        max_distance=0.5,
+                        compression=config.compression,
+                    )
+
+                    stage3_elapsed = time.time() - stage3_start
+                    logger.info(f"    ✓ Extracted DSM: {dsm_extraction.extracted_dsm_path.name}")
+                    logger.info(f"    ✓ DSM points: {dsm_extraction.original_dsm_count:,} → {dsm_extraction.extracted_dsm_count:,} ({dsm_extraction.reduction_ratio*100:.1f}% reduction)")
+                    logger.info(f"    ✓ Distance stats: min={dsm_extraction.distance_stats['min']:.3f}m, max={dsm_extraction.distance_stats['max']:.3f}m, mean={dsm_extraction.distance_stats['mean']:.3f}m")
+                    logger.info(f"    ✓ Stage 3 completed in {stage3_elapsed:.2f}s")
+
+                except Exception as e:
+                    logger.warning(f"    ✗ Stage 3 (DSM extraction) failed: {e}")
+                    logger.warning(f"    ⚠ Skipping GICP alignment")
+                    dsm_extraction = None
+            else:
+                logger.info(f"    ⏭ Skipping Stage 3 (DSM extraction) - Stage 2 failed")
+
+            # Stage 4: GICP Alignment
+            stage4_elapsed = 0.0
+            gicp_result = None
+            if dsm_extraction is not None:
+                try:
+                    logger.info(f"    [Stage 4/4] GICP Alignment...")
+                    stage4_start = time.time()
+
+                    aligned_lidar_path = segment_output_dir / (config.output_file_prefix + "_gicp_utm.parquet")
+                    metrics_json_path = segment_output_dir / (config.output_file_prefix + "_gicp_metrics.json")
+
+                    gicp_params = GICPParams(
+                        voxel_size=0.3,
+                        normal_k=20,
+                        max_corr_dist=0.8,
+                        max_iter=60,
+                        enforce_z_up=True,
+                    )
+
+                    gicp_result = align_lidar_to_dsm(
+                        lidar_parquet_path=macro.utm_point_path,
+                        dsm_parquet_path=dsm_extraction.extracted_dsm_path,
+                        meta_path=macro.meta_path,
+                        output_lidar_path=aligned_lidar_path,
+                        output_metrics_path=metrics_json_path,
+                        params=gicp_params,
+                        compression=config.compression,
+                    )
+
+                    stage4_elapsed = time.time() - stage4_start
+                    logger.info(f"    ✓ Aligned LiDAR: {gicp_result.aligned_lidar_path.name}")
+                    logger.info(f"    ✓ GICP fitness: {gicp_result.fitness:.6f}, RMSE: {gicp_result.inlier_rmse:.6f}m")
+                    logger.info(f"    ✓ Transform: translation=[{gicp_result.translation_m[0]:.3f}, {gicp_result.translation_m[1]:.3f}, {gicp_result.translation_m[2]:.3f}]m, yaw={gicp_result.yaw_deg:.3f}°")
+                    logger.info(f"    ✓ Alignment quality: NN RMSE={gicp_result.nn_rmse:.6f}m, mean abs dist={gicp_result.nn_mean_abs_distance:.6f}m")
+                    logger.info(f"    ✓ Metrics saved: {gicp_result.metrics_json_path.name}")
+                    logger.info(f"    ✓ Stage 4 completed in {stage4_elapsed:.2f}s")
+
+                except Exception as e:
+                    logger.warning(f"    ✗ Stage 4 (GICP alignment) failed: {e}")
+                    logger.warning(f"    ⚠ Continuing without GICP alignment")
+                    gicp_result = None
+            else:
+                logger.info(f"    ⏭ Skipping Stage 4 (GICP alignment) - Stage 3 failed")
+
             # Read metadata for logging
             meta_duration_s = None
             meta_motion_length_m = None
@@ -514,7 +594,7 @@ def process_log_segments(log_dir: Path, config: PipelineConfig,
             logger.info(f"")
             logger.info(f"    {'─'*66}")
             logger.info(f"    ✓ Segment {segment_name} COMPLETED")
-            logger.info(f"    Total time: {segment_elapsed:.2f}s (Stage1: {stage1_elapsed:.2f}s, Stage2: {stage2_elapsed:.2f}s)")
+            logger.info(f"    Total time: {segment_elapsed:.2f}s (Stage1: {stage1_elapsed:.2f}s, Stage2: {stage2_elapsed:.2f}s, Stage3: {stage3_elapsed:.2f}s, Stage4: {stage4_elapsed:.2f}s)")
             logger.info(f"    Output: {segment_output_dir}")
             logger.info(f"    {'─'*66}")
 
@@ -532,6 +612,8 @@ def process_log_segments(log_dir: Path, config: PipelineConfig,
                 'total_time': segment_elapsed,
                 'stage1_time': stage1_elapsed,
                 'stage2_time': stage2_elapsed,
+                'stage3_time': stage3_elapsed,
+                'stage4_time': stage4_elapsed,
             }
             timing_records.append(record)
 
@@ -804,39 +886,49 @@ def main(config_path: Optional[Path] = None) -> int:
     if all_timing_records:
         logger.info("")
         logger.info("DETAILED TIMING BREAKDOWN")
-        logger.info("="*80)
-        logger.info(f"{'Segment Name':<50} {'Total':>10} {'Stage1':>10} {'Stage2':>10}")
-        logger.info("-"*80)
+        logger.info("="*110)
+        logger.info(f"{'Segment Name':<50} {'Total':>10} {'Stage1':>10} {'Stage2':>10} {'Stage3':>10} {'Stage4':>10}")
+        logger.info("-"*110)
 
         total_time_sum = 0.0
         stage1_time_sum = 0.0
         stage2_time_sum = 0.0
+        stage3_time_sum = 0.0
+        stage4_time_sum = 0.0
 
         for record in all_timing_records:
             logger.info(
                 f"{record['segment_name']:<50} "
                 f"{record['total_time']:>9.2f}s "
                 f"{record['stage1_time']:>9.2f}s "
-                f"{record['stage2_time']:>9.2f}s"
+                f"{record['stage2_time']:>9.2f}s "
+                f"{record.get('stage3_time', 0.0):>9.2f}s "
+                f"{record.get('stage4_time', 0.0):>9.2f}s"
             )
             total_time_sum += record['total_time']
             stage1_time_sum += record['stage1_time']
             stage2_time_sum += record['stage2_time']
+            stage3_time_sum += record.get('stage3_time', 0.0)
+            stage4_time_sum += record.get('stage4_time', 0.0)
 
-        logger.info("-"*80)
+        logger.info("-"*110)
         logger.info(
             f"{'TOTAL':<50} "
             f"{total_time_sum:>9.2f}s "
             f"{stage1_time_sum:>9.2f}s "
-            f"{stage2_time_sum:>9.2f}s"
+            f"{stage2_time_sum:>9.2f}s "
+            f"{stage3_time_sum:>9.2f}s "
+            f"{stage4_time_sum:>9.2f}s"
         )
         logger.info(
             f"{'AVERAGE':<50} "
             f"{total_time_sum/len(all_timing_records):>9.2f}s "
             f"{stage1_time_sum/len(all_timing_records):>9.2f}s "
-            f"{stage2_time_sum/len(all_timing_records):>9.2f}s"
+            f"{stage2_time_sum/len(all_timing_records):>9.2f}s "
+            f"{stage3_time_sum/len(all_timing_records):>9.2f}s "
+            f"{stage4_time_sum/len(all_timing_records):>9.2f}s"
         )
-        logger.info("="*80)
+        logger.info("="*110)
 
     logger.info("")
     logger.info("✓ Pipeline completed successfully!")

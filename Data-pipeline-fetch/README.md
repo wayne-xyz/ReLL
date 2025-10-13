@@ -16,6 +16,9 @@ This is a **standalone, self-contained pipeline** that fetches Argoverse2 LiDAR 
 ✅ **No train/val/test split** - All output in single directory structure
 ✅ **Complete alignment** - Generates LiDAR + imagery + DSM for each segment
 ✅ **Vertical alignment** - Ground-based elevation alignment between LiDAR and DSM
+✅ **DSM extraction** - Extracts DSM points within 0.5m of LiDAR for efficient alignment
+✅ **GICP alignment** - Generalized ICP alignment of LiDAR to DSM reference
+✅ **Quality metrics** - Comprehensive alignment quality assessment (RMSE, distances, percentiles)
 ✅ **Incremental CSV** - Appends to existing summary files, never overwrites
 ✅ **Detailed logging** - Track progress and time cost for each sample
 ✅ **Automatic cleanup** - Removes temporary files after processing
@@ -41,15 +44,16 @@ Data-pipeline-fetch/
 ### 1. Install Dependencies
 
 ```bash
-pip install numpy pyarrow pandas rasterio pyproj laspy scipy pyyaml
+pip install numpy pyarrow pandas rasterio pyproj laspy scipy pyyaml open3d
 ```
 
 **Required packages:**
 - `numpy`, `pyarrow`, `pandas` - Core data processing
 - `rasterio`, `pyproj` - Geospatial transformations
 - `laspy` - LAZ/LAS point cloud I/O
-- `scipy` - KD-tree for vertical alignment
+- `scipy` - KD-tree for DSM extraction and vertical alignment
 - `pyyaml` - Configuration file parsing
+- `open3d` - GICP alignment (Generalized ICP)
 
 ### 2. Configure the Pipeline
 
@@ -158,7 +162,41 @@ The pipeline uses **smart city filtering** to avoid wasting time and bandwidth:
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 5: CLEANUP                                               │
+│  STAGE 5: EXTRACT DSM NEAR LIDAR                                │
+│  Extracts DSM points within 0.5m of LiDAR points                │
+├─────────────────────────────────────────────────────────────────┤
+│  • Builds KD-tree from LiDAR UTM points (XY only)               │
+│  • For each DSM point, computes nearest LiDAR distance          │
+│  • Filters DSM to points within 0.5m threshold                  │
+│  • Computes distance statistics (min, max, mean, percentiles)   │
+│  • Outputs:                                                     │
+│    - segment_extract_dsm_utm.parquet (extracted DSM points)     │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  STAGE 6: GICP ALIGNMENT                                        │
+│  Aligns LiDAR to DSM reference using Generalized ICP            │
+├─────────────────────────────────────────────────────────────────┤
+│  • Source: segment_utm.parquet (LiDAR)                          │
+│  • Target: segment_extract_dsm_utm.parquet (extracted DSM)      │
+│  • Local frame anchor: Uses metadata center point              │
+│    (center sweep's vehicle position from original pose data)    │
+│  • Shifts both clouds to anchor-centered local frame            │
+│  • Downsampling: 0.3m voxel size                                │
+│  • Estimates normals with k=20 neighbors                        │
+│  • Runs GICP with max correspondence distance 0.8m              │
+│  • Composes transform back to global UTM frame                  │
+│  • Computes alignment quality metrics:                          │
+│    - GICP fitness and RMSE                                      │
+│    - Nearest-neighbor RMSE and mean absolute distance           │
+│    - Distance percentiles (p50, p75, p90, p95, p99)             │
+│  • Outputs:                                                     │
+│    - segment_gicp_utm.parquet (GICP-aligned LiDAR)              │
+│    - segment_gicp_metrics.json (transform + quality metrics)    │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  STAGE 7: CLEANUP                                               │
 │  Removes temporary downloaded data                              │
 ├─────────────────────────────────────────────────────────────────┤
 │  • Deletes original downloaded log (if cleanup_after_processing)│
@@ -174,11 +212,14 @@ Each segment is saved in its own directory:
 ```
 processed_samples_austin/
 ├── 0000a0e0-a333-4a84-b645-74b4c2a96bda_000/
-│   ├── segment.parquet              # Sensor-frame point cloud
-│   ├── segment_utm.parquet          # UTM-frame point cloud
-│   ├── segment_meta.parquet         # Metadata (poses, timestamps, extents)
-│   ├── segment_imagery_utm.tif      # Aligned imagery (GeoTIFF)
-│   └── segment_dsm_utm.laz          # Aligned DSM (LAZ)
+│   ├── segment.parquet                      # Sensor-frame point cloud
+│   ├── segment_utm.parquet                  # UTM-frame point cloud (vertically aligned)
+│   ├── segment_meta.parquet                 # Metadata (poses, timestamps, extents)
+│   ├── segment_imagery_utm.tif              # Aligned imagery (GeoTIFF)
+│   ├── segment_dsm_utm.laz                  # Aligned DSM (LAZ)
+│   ├── segment_extract_dsm_utm.parquet      # Extracted DSM points (within 0.5m of LiDAR)
+│   ├── segment_gicp_utm.parquet             # GICP-aligned LiDAR
+│   └── segment_gicp_metrics.json            # GICP metrics and transform matrix
 ├── 0000a0e0-a333-4a84-b645-74b4c2a96bda_001/
 │   ├── segment.parquet
 │   ├── segment_utm.parquet
@@ -201,6 +242,22 @@ processed_samples_austin/
   - Bounding boxes and extents
   - Crop information
   - Motion statistics
+- `segment_imagery_utm.tif`: Aligned overhead imagery in GeoTIFF format
+- `segment_dsm_utm.laz`: Digital Surface Model points in LAZ format
+- `segment_extract_dsm_utm.parquet`: **Extracted DSM points** within 0.5m of any LiDAR point (utm_e, utm_n, elevation)
+  - Used as reference for GICP alignment
+  - Typically 30-60% of original DSM points
+- `segment_gicp_utm.parquet`: **GICP-aligned LiDAR** point cloud (utm_e, utm_n, elevation, intensity, laser_number, offset_ns, source_index, source_timestamp_ns)
+  - LiDAR aligned to DSM reference using Generalized ICP
+  - Preserves all original attributes
+- `segment_gicp_metrics.json`: GICP alignment metrics including:
+  - Local frame anchor (center sweep's vehicle position from metadata)
+  - Transformation matrix (4x4 homogeneous in global UTM frame)
+  - Translation vector (XYZ in meters)
+  - Yaw angle (degrees)
+  - GICP fitness and inlier RMSE
+  - Nearest-neighbor RMSE and mean absolute distance
+  - Distance percentiles (p50, p75, p90, p95, p99)
 
 ## Configuration
 

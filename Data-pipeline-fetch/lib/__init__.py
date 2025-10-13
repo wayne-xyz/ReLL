@@ -17,6 +17,18 @@ from .imagery_processing import (
     DEFAULT_BUFFER_METERS,
 )
 
+from .dsm_extraction import (
+    extract_dsm_near_lidar,
+    DSMExtractionResult,
+)
+
+from .gicp_alignment import (
+    align_lidar_to_dsm,
+    GICPResult,
+    GICPParams,
+    load_anchor_from_metadata,
+)
+
 __all__ = [
     # LiDAR processing
     "create_macro_sweep",
@@ -31,4 +43,12 @@ __all__ = [
     "run_stage_two",
     "StageTwoResult",
     "DEFAULT_BUFFER_METERS",
+    # DSM extraction
+    "extract_dsm_near_lidar",
+    "DSMExtractionResult",
+    # GICP alignment
+    "align_lidar_to_dsm",
+    "GICPResult",
+    "GICPParams",
+    "load_anchor_from_metadata",
 ]
