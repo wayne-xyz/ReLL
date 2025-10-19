@@ -2,8 +2,8 @@
 # Use this for testing with a small number of samples
 
 target_city: "ATX"
-sample_count: 1  # Just 2 samples for quick testing
-fetch_splits: ["val"]
+sample_count: 20  # Just 2 samples for quick testing
+fetch_splits: ["train"]
 skip_existing_downloads: true
 skip_processed_logs: true  # Skip logs that already have output
 
@@ -15,7 +15,7 @@ buffer_meters: 2.0  # Only used if crop_size_meters is null
 
 # Paths
 temp_download_dir: "../temp_argoverse_download"
-output_dir: "../processed_samples_austin_test"
+output_dir: "../processed_samples_austin_train"
 city_geoalign_root: "../Argoverse2-geoalign/ATX"
 s5cmd_path: "../ArgoverseLidar/s5cmd/s5cmd.exe"
 
