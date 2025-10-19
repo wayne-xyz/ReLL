@@ -986,6 +986,50 @@ All transformations are handled automatically.
 - [ ] Custom imagery sources
 - [ ] Configurable point cloud attributes
 
+## Experimental methods considered (not included by default)
+
+During development several experimental preprocessing and registration strategies were explored (see the separate
+experiments folder). These techniques can improve alignment for specific scenes but were not chosen as the pipeline's
+default behavior for reasons of robustness, generality, and maintainability. Below is a concise summary so future users
+can reproduce or re-enable them if needed.
+
+- Vertical gating (per-point):
+  - Idea: Remove LiDAR points that are vertically inconsistent with nearby DSM points before ICP (keeps ground-like points).
+  - Pros: Can improve registration in ground-dominated scenes and reduce misleading high-structure matches.
+  - Cons / Why not default: Tends to be brittle across mixed scenes (vegetation/overhangs/urban furniture). Aggressive thresholds
+    removed too much signal in many samples; implementing robust fallback heuristics increased complexity.
+
+- DSM-style filtering (highest-per-cell):
+  - Idea: Convert LiDAR into a DSM-like surface by keeping the highest point per horizontal cell, then register to DSM.
+  - Pros: Works well for roof/roofline-dominated scenes where building surfaces dominate.
+  - Cons / Why not default: Discards vertical structure that is helpful in other scenes (trees, vehicles, underpasses). It is
+    useful as an experimental mode for targeted datasets but not a universal default.
+
+- Z down-weighting during ICP + post-correction:
+  - Idea: Reduce the influence of Z during the ICP iterations (less vertical attraction), then restore/replace Z afterwards by
+    sampling DSM medians for final vertical accuracy.
+  - Pros: Helps when small vertical errors cause ICP to converge to incorrect lateral/rotational solutions.
+  - Cons / Why not default: The pipeline's grid-based median vertical alignment reduces most of these cases upfront. Adding
+    Z-scaling during GICP added parameter sensitivity and occasional fail cases; we prefer the simpler pre-align + full-GICP flow.
+
+- Multi-mode ICP fallbacks (try Op1 → Op2 → fallback):
+  - Idea: Try multiple preprocessing/ICP modes in sequence and pick the best based on diagnostics (NN RMSE, counts).
+  - Pros: Can salvage difficult segments where a single strategy fails.
+  - Cons / Why not default: Introduces branching logic and long tail of maintenance/debugging. For large-scale processing the
+    simpler single-path pipeline (vertical align → extract DSM → GICP) delivered higher overall throughput and fewer hard-to-reproduce
+    errors.
+
+How to reuse these experiments
+------------------------------
+- The `gicp_analysis_example` folder contains the experimental scripts and notebooks used to prototype these ideas. If you need
+  to apply these techniques for a specialized dataset (e.g., roof-only scenes), treat them as optional processing modes and test
+  on a held-out sample set.
+- Recommendations for re-enabling:
+  1. Run experiments on a representative subset and collect alignment diagnostics (NN RMSE, percentiles, failure modes).
+  2. If helpful, wrap any experimental mode behind a clear config flag and a finite set of diagnostics that determine success.
+  3. Prefer small opt-in changes (optional flag per run) over branching defaults; this keeps the main pipeline stable.
+
+
 ## Summary
 
 This pipeline provides an end-to-end solution for:
