@@ -20,3 +20,4 @@ analysis/__pycache__
 no-gate-gicp-result/
 op2-dsmsty-filter-gicp-result
 processed_samples_austin_test
+processed_samples_austin_train
