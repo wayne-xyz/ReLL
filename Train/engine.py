@@ -8,6 +8,7 @@ from typing import Dict, Optional, Tuple, Union
 import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, random_split
+from torch.serialization import add_safe_globals
 
 from config import (
     DatasetConfig,
@@ -267,6 +268,7 @@ def load_localization_model(
     device: Optional[Union[str, torch.device]] = None,
     return_optimizer: bool = True,
 ) -> Tuple[LocalizationModel, Optional[torch.optim.Optimizer], Dict]:
+    add_safe_globals([DatasetConfig, ModelConfig, OptimConfig, SaveConfig, EarlyStopConfig])
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model_cfg: ModelConfig = checkpoint["model_cfg"]
     optim_cfg: OptimConfig = checkpoint["optim_cfg"]

@@ -148,7 +148,7 @@ def default_early_stop_config() -> EarlyStopConfig:
         monitor="val_loss",
         mode="min",
         min_delta=1e-3,
-        patience=10,
+        patience=50,
         warmup_epochs=20,
         restore_best=True,
     )
