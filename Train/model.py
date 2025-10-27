@@ -354,32 +354,31 @@ class LocalizationCriterion(nn.Module):
 
         theta_ref, theta_std = self._yaw_mean_std_from_scores(O)
 
-        L_xy = (dx_m - mu_gt[:, 0]).abs() + (dy_m - mu_gt[:, 1]).abs()
-        angdiff = self._wrap_angle(theta_ref - mu_gt[:, 2])
-        L_th = angdiff.abs()
+        err_x = dx_m - mu_gt[:, 0]
+        err_y = dy_m - mu_gt[:, 1]
+        err_theta = self._wrap_angle(theta_ref - mu_gt[:, 2])
+
+        rms_eps = 1e-9
+        rms_x = torch.sqrt(torch.mean(err_x ** 2) + rms_eps)
+        rms_y = torch.sqrt(torch.mean(err_y ** 2) + rms_eps)
+        rms_theta = torch.sqrt(torch.mean(err_theta ** 2) + rms_eps)
 
         L_sig_xy = (sigma_m_x - sigma_gt[:, 0]).abs() + (sigma_m_y - sigma_gt[:, 1]).abs()
         L_sig_th = (theta_std - sigma_gt[:, 2]).abs()
 
         loss = (
-            self.w_xy * L_xy.mean()
-            + self.w_theta * L_th.mean()
+            self.w_xy * (rms_x + rms_y)
+            + self.w_theta * rms_theta
             + self.alpha_xy * L_sig_xy.mean()
             + self.alpha_theta * L_sig_th.mean()
         )
 
-        err_x = dx_m - mu_gt[:, 0]
-        err_y = dy_m - mu_gt[:, 1]
-        err_theta = angdiff
-
         metrics = {
-            "mean_abs_xy": err_x.abs().mean() + err_y.abs().mean(),
-            "mean_abs_theta": L_th.mean(),
             "sigma_xy_mae": L_sig_xy.mean(),
             "sigma_theta_mae": L_sig_th.mean(),
-            "rms_x": torch.sqrt(torch.mean(err_x ** 2)),
-            "rms_y": torch.sqrt(torch.mean(err_y ** 2)),
-            "rms_theta": torch.sqrt(torch.mean(err_theta ** 2)),
+            "rms_x": rms_x,
+            "rms_y": rms_y,
+            "rms_theta": rms_theta,
         }
         return loss, metrics
 

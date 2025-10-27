@@ -45,8 +45,6 @@ class Trainer:
         self.model.train()
         total_loss = 0.0
         total_metrics = {
-            "mean_abs_xy": 0.0,
-            "mean_abs_theta": 0.0,
             "sigma_xy_mae": 0.0,
             "sigma_theta_mae": 0.0,
             "rms_x": 0.0,
@@ -121,8 +119,6 @@ class Trainer:
         self.model.eval()
         total_loss = 0.0
         total_metrics = {
-            "mean_abs_xy": 0.0,
-            "mean_abs_theta": 0.0,
             "sigma_xy_mae": 0.0,
             "sigma_theta_mae": 0.0,
             "rms_x": 0.0,
@@ -165,8 +161,6 @@ class Trainer:
 
         stats = {
             "val_loss": total_loss / max(count, 1),
-            "val_mean_abs_xy": total_metrics["mean_abs_xy"] / max(count, 1),
-            "val_mean_abs_theta": total_metrics["mean_abs_theta"] / max(count, 1),
             "val_sigma_xy_mae": total_metrics["sigma_xy_mae"] / max(count, 1),
             "val_sigma_theta_mae": total_metrics["sigma_theta_mae"] / max(count, 1),
             "val_rms_x": total_metrics["rms_x"] / max(count, 1),
@@ -186,16 +180,12 @@ class Trainer:
 def create_history_dict() -> Dict[str, list]:
     return {
         "train_loss": [],
-        "train_mean_abs_xy": [],
-        "train_mean_abs_theta": [],
         "train_sigma_xy_mae": [],
         "train_sigma_theta_mae": [],
         "train_rms_x": [],
         "train_rms_y": [],
         "train_rms_theta": [],
         "val_loss": [],
-        "val_mean_abs_xy": [],
-        "val_mean_abs_theta": [],
         "val_sigma_xy_mae": [],
         "val_sigma_theta_mae": [],
         "val_rms_x": [],
@@ -406,16 +396,12 @@ def train_localization_model(
         eval_time_total = time.perf_counter() - eval_start
 
         history["train_loss"].append(train_stats["loss"])
-        history["train_mean_abs_xy"].append(train_stats["mean_abs_xy"])
-        history["train_mean_abs_theta"].append(train_stats["mean_abs_theta"])
         history["train_sigma_xy_mae"].append(train_stats["sigma_xy_mae"])
         history["train_sigma_theta_mae"].append(train_stats["sigma_theta_mae"])
         history["train_rms_x"].append(train_stats["rms_x"])
         history["train_rms_y"].append(train_stats["rms_y"])
         history["train_rms_theta"].append(train_stats["rms_theta"])
         history["val_loss"].append(val_stats["val_loss"])
-        history["val_mean_abs_xy"].append(val_stats["val_mean_abs_xy"])
-        history["val_mean_abs_theta"].append(val_stats["val_mean_abs_theta"])
         history["val_sigma_xy_mae"].append(val_stats["val_sigma_xy_mae"])
         history["val_sigma_theta_mae"].append(val_stats["val_sigma_theta_mae"])
         history["val_rms_x"].append(val_stats["val_rms_x"])
@@ -470,16 +456,12 @@ def train_localization_model(
         print(
             f"Epoch {epochs_done:02d}/{total_epochs}: "
             f"train_loss={train_stats['loss']:.4f}  "
-            f"| train_mean_abs_xy={train_stats['mean_abs_xy']:.3f} m  "
-            f"| train_mean_abs_theta={train_stats['mean_abs_theta']:.4f} rad  "
             f"| train_sigma_xy_mae={train_stats['sigma_xy_mae']:.3f} m  "
             f"| train_sigma_theta_mae={train_stats['sigma_theta_mae']:.4f} rad  "
             f"| train_rms_x={train_stats['rms_x']:.3f} m  "
             f"| train_rms_y={train_stats['rms_y']:.3f} m  "
             f"| train_rms_theta={train_stats['rms_theta']:.4f} rad  ||  "
             f"val_loss={val_stats['val_loss']:.4f}  "
-            f"| val_mean_abs_xy={val_stats['val_mean_abs_xy']:.3f} m  "
-            f"| val_mean_abs_theta={val_stats['val_mean_abs_theta']:.4f} rad  "
             f"| val_sigma_xy_mae={val_stats['val_sigma_xy_mae']:.3f} m  "
             f"| val_sigma_theta_mae={val_stats['val_sigma_theta_mae']:.4f} rad  "
             f"| val_rms_x={val_stats['val_rms_x']:.3f} m  "
