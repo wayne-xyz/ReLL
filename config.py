@@ -96,7 +96,7 @@ def default_dataset_config() -> DatasetConfig:
         sample_root=[],
         lidar_variant="gicp",
         cache_rasters=True,
-        max_translation_px=8,
+        max_translation_px=4,
         max_rotation_deg=0.0,
         target_sigma_xy_m=0.3,
         target_sigma_yaw_rad=math.radians(0.5),
@@ -110,11 +110,11 @@ def default_model_config() -> ModelConfig:
         map_in_channels=5,
         embed_dim=64,
         encoder_depth=4,
-        search_radius=8,
+        search_radius=4,
         theta_bins=25,
         theta_range_deg=4.0,
         height_attention=True,
-        proj_dim=2,
+        proj_dim=1,
     )
 
 
@@ -122,7 +122,7 @@ def default_optim_config() -> OptimConfig:
     return OptimConfig(
         lr=1e-4,
         weight_decay=1e-4,
-        batch_size=16,
+        batch_size=8,
         num_workers=2,
         epochs=10,
         device="cuda" if torch.cuda.is_available() else "cpu",
