@@ -368,11 +368,18 @@ class LocalizationCriterion(nn.Module):
             + self.alpha_theta * L_sig_th.mean()
         )
 
+        err_x = dx_m - mu_gt[:, 0]
+        err_y = dy_m - mu_gt[:, 1]
+        err_theta = angdiff
+
         metrics = {
-            "mean_abs_xy": (dx_m - mu_gt[:, 0]).abs().mean() + (dy_m - mu_gt[:, 1]).abs().mean(),
+            "mean_abs_xy": err_x.abs().mean() + err_y.abs().mean(),
             "mean_abs_theta": L_th.mean(),
             "sigma_xy_mae": L_sig_xy.mean(),
             "sigma_theta_mae": L_sig_th.mean(),
+            "rms_x": torch.sqrt(torch.mean(err_x ** 2)),
+            "rms_y": torch.sqrt(torch.mean(err_y ** 2)),
+            "rms_theta": torch.sqrt(torch.mean(err_theta ** 2)),
         }
         return loss, metrics
 

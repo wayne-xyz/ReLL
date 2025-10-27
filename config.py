@@ -88,7 +88,7 @@ class EarlyStopConfig:
 # ---------------------------------------------------------------------------
 
 DEFAULT_SAVE_ROOT = Path("/content/drive/MyDrive/Rell-model")
-DEFAULT_DATA_ROOT = Path("processed_samples_austin_train")
+DEFAULT_DATA_ROOT = Path("/content/drive/MyDrive/Rell-sample-raster")
 
 
 def default_dataset_config() -> DatasetConfig:
