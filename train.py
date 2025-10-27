@@ -30,6 +30,10 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override training device (e.g. cpu, cuda, cuda:1).",
     )
+    parser.add_argument("--batch-size", type=int, default=None, help="Override batch size.")
+    parser.add_argument("--epochs", type=int, default=None, help="Override training epochs.")
+    parser.add_argument("--lr", type=float, default=None, help="Override optimizer learning rate.")
+    parser.add_argument("--weight-decay", type=float, default=None, help="Override optimizer weight decay.")
     return parser.parse_args()
 
 
@@ -58,6 +62,14 @@ def main() -> None:
     )
 
     optim_cfg.device = _detect_device(args.device)
+    if args.batch_size is not None:
+        optim_cfg.batch_size = args.batch_size
+    if args.epochs is not None:
+        optim_cfg.epochs = args.epochs
+    if args.lr is not None:
+        optim_cfg.lr = args.lr
+    if args.weight_decay is not None:
+        optim_cfg.weight_decay = args.weight_decay
 
     print(f"[Device] Training on: {optim_cfg.device}")
 
