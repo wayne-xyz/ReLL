@@ -21,3 +21,7 @@ no-gate-gicp-result/
 op2-dsmsty-filter-gicp-result
 processed_samples_austin_test
 processed_samples_austin_train
+Rell-sample-raster
+model-save
+Train/__pycache__
+__pycache__
