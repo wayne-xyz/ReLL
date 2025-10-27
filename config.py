@@ -108,13 +108,13 @@ def default_model_config() -> ModelConfig:
     return ModelConfig(
         lidar_in_channels=3,
         map_in_channels=5,
-        embed_dim=32,
+        embed_dim=64,
         encoder_depth=4,
         search_radius=8,
         theta_bins=25,
         theta_range_deg=4.0,
         height_attention=True,
-        proj_dim=4,
+        proj_dim=2,
     )
 
 
@@ -124,7 +124,7 @@ def default_optim_config() -> OptimConfig:
         weight_decay=1e-4,
         batch_size=16,
         num_workers=2,
-        epochs=5,
+        epochs=10,
         device="cuda" if torch.cuda.is_available() else "cpu",
     )
 
