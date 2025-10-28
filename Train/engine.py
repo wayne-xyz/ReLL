@@ -336,7 +336,7 @@ def train_localization_model(
 
     full_dataset = GeoAlignRasterDataset(dataset_cfg)
     n_total = len(full_dataset)
-    n_train = max(1, int(0.8 * n_total))
+    n_train = max(1, int(0.9 * n_total))
     n_val = max(1, n_total - n_train)
     if n_train + n_val > n_total:
         n_val = n_total - n_train
