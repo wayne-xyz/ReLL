@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--plot-metrics",
         action="store_true",
-        help="Display training curves (loss/RMS/pixel error) in a pop-up window after training.",
+        help="Save training curves (loss/RMS/pixel error) to an image inside --save-dir after training.",
     )
     return parser.parse_args()
 
@@ -133,10 +133,10 @@ def main() -> None:
     )
 
     if args.plot_metrics:
-        _show_training_plots(history)
+        _export_training_plots(history, save_cfg.save_dir)
 
 
-def _show_training_plots(history: dict) -> None:
+def _export_training_plots(history: dict, save_dir: Path) -> None:
     try:
         import matplotlib.pyplot as plt
     except ImportError as exc:  # pragma: no cover - optional dependency
@@ -185,7 +185,12 @@ def _show_training_plots(history: dict) -> None:
 
     fig.suptitle("Training Progress", fontsize=14)
     plt.tight_layout()
-    plt.show()
+    output_dir = Path(save_dir) if save_dir is not None else Path(".")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plot_path = output_dir / "training_metrics.png"
+    fig.savefig(plot_path, dpi=200)
+    plt.close(fig)
+    print(f"[Plot] Saved training metrics to {plot_path.resolve()}")
 
 
 if __name__ == "__main__":
