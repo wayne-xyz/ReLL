@@ -336,10 +336,19 @@ def train_localization_model(
 
     full_dataset = GeoAlignRasterDataset(dataset_cfg)
     n_total = len(full_dataset)
-    n_train = max(1, int(0.9 * n_total))
-    n_val = max(1, n_total - n_train)
-    if n_train + n_val > n_total:
-        n_val = n_total - n_train
+    train_fraction = float(getattr(dataset_cfg, "train_fraction", 0.9))
+    if n_total < 2:
+        raise ValueError("Need at least 2 samples to create train/val splits.")
+    if train_fraction <= 0.0:
+        raise ValueError("train_fraction must be > 0.")
+    n_train = max(1, int(round(n_total * train_fraction)))
+    if n_train >= n_total:
+        n_train = n_total - 1
+    n_val = n_total - n_train
+    if n_val <= 0:
+        n_val = 1
+        n_train = n_total - n_val
+    print(f"[Split] train={n_train} ({n_train / n_total:.1%}), val={n_val} ({n_val / n_total:.1%})")
     train_ds, val_ds = random_split(
         full_dataset,
         [n_train, n_val],

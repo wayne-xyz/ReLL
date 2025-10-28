@@ -6,6 +6,7 @@ dataset:
   max_rotation_deg: 0.0
   target_sigma_xy_m: 0.3
   target_sigma_yaw_rad: 0.008726646259971648  # ≈0.5° in radians
+  train_fraction: 0.8
 
 model:
   lidar_in_channels: 3

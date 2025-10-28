@@ -61,7 +61,13 @@ class LocalizationModel(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        self.shared_encoder = PyramidEncoder(
+        self.lidar_encoder = PyramidEncoder(
+            in_channels=config.stem_channels,
+            embed_dim=config.embed_dim,
+            depth=config.encoder_depth,
+            base_channels=config.encoder_base_channels,
+        )
+        self.map_encoder = PyramidEncoder(
             in_channels=config.stem_channels,
             embed_dim=config.embed_dim,
             depth=config.encoder_depth,
@@ -70,7 +76,8 @@ class LocalizationModel(nn.Module):
 
         if config.translation_smoothing_kernel < 1 or config.translation_smoothing_kernel % 2 == 0:
             raise ValueError("translation_smoothing_kernel must be a positive odd integer.")
-        self.projection = nn.Conv2d(config.embed_dim, config.proj_dim, kernel_size=1, bias=False)
+        self.lidar_projection = nn.Conv2d(config.embed_dim, config.proj_dim, kernel_size=1, bias=False)
+        self.map_projection = nn.Conv2d(config.embed_dim, config.proj_dim, kernel_size=1, bias=False)
         self.translation_smoother = nn.Conv2d(
             in_channels=1,
             out_channels=1,
@@ -81,9 +88,9 @@ class LocalizationModel(nn.Module):
         nn.init.constant_(self.translation_smoother.weight, 1.0 / (config.translation_smoothing_kernel ** 2))
         self.translation_smoother.weight.requires_grad_(False)
 
-    def _encode(self, x: Tensor, adapter: nn.Module) -> Tensor:
+    def _encode(self, x: Tensor, adapter: nn.Module, encoder: nn.Module) -> Tensor:
         x = adapter(x)
-        x = self.shared_encoder(x)
+        x = encoder(x)
         return x
 
     def _l2norm(self, emb: Tensor) -> Tensor:
@@ -100,11 +107,11 @@ class LocalizationModel(nn.Module):
         return cost
 
     def forward(self, lidar: Tensor, geospatial: Tensor) -> Dict[str, Tensor]:
-        lidar_feat = self._encode(lidar, self.lidar_adapter)
-        map_feat = self._encode(geospatial, self.map_adapter)
+        lidar_feat = self._encode(lidar, self.lidar_adapter, self.lidar_encoder)
+        map_feat = self._encode(geospatial, self.map_adapter, self.map_encoder)
 
-        lidar_proj = self._l2norm(self.projection(lidar_feat))
-        map_proj = self._l2norm(self.projection(map_feat))
+        lidar_proj = self._l2norm(self.lidar_projection(lidar_feat))
+        map_proj = self._l2norm(self.map_projection(map_feat))
 
         translation_logits = self.compute_translation_logits(lidar_proj, map_proj)
 

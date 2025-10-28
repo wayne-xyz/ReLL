@@ -31,6 +31,7 @@ class DatasetConfig:
     target_sigma_xy_m: float = 0.2
     target_sigma_yaw_rad: float = math.radians(1.0)
     raster_builder: Optional[Callable[[Path], Dict[str, Any]]] = None
+    train_fraction: float = 0.9
 
 
 @dataclass
@@ -99,6 +100,7 @@ def default_dataset_config() -> DatasetConfig:
         target_sigma_xy_m=0.3,
         target_sigma_yaw_rad=math.radians(0.5),
         raster_builder=None,
+        train_fraction=0.9,
     )
 
 
