@@ -36,19 +36,15 @@ class DatasetConfig:
 class ModelConfig:
     lidar_in_channels: int = 3
     map_in_channels: int = 5
+    stem_channels: int = 32
     embed_dim: int = 128
-    encoder_depth: int = 4
+    encoder_depth: int = 3
+    encoder_base_channels: int = 64
+    proj_dim: int = 32
     search_radius: int = 8
-    theta_bins: int = 25
-    theta_range_deg: float = 4.0
-    height_attention: bool = True
-    height_recon_weight: float = 0.0
-    proj_dim: int = 4
+    translation_smoothing_kernel: int = 1
+    gaussian_sigma_px: float = 1.0
     w_xy: float = 1.0
-    w_theta: float = 0.5
-    alpha_xy: float = 0.04
-    alpha_theta: float = 0.20
-    translation_temperature: float = 10
 
 
 @dataclass
@@ -109,13 +105,14 @@ def default_model_config() -> ModelConfig:
     return ModelConfig(
         lidar_in_channels=3,
         map_in_channels=5,
+        stem_channels=32,
         embed_dim=64,
-        encoder_depth=4,
+        encoder_depth=3,
+        encoder_base_channels=64,
+        proj_dim=32,
         search_radius=4,
-        theta_bins=25,
-        theta_range_deg=4.0,
-        height_attention=True,
-        proj_dim=1,
+        translation_smoothing_kernel=1,
+        gaussian_sigma_px=1.0,
     )
 
 
@@ -125,7 +122,7 @@ def default_optim_config() -> OptimConfig:
         weight_decay=1e-4,
         batch_size=8,
         num_workers=2,
-        epochs=10,
+        epochs=200,
         device="cuda" if torch.cuda.is_available() else "cpu",
     )
 

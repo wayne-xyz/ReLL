@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import random
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
@@ -45,12 +46,7 @@ class Trainer:
     def train_epoch(self, loader: DataLoader) -> Tuple[Dict[str, float], Dict[str, float]]:
         self.model.train()
         total_loss = 0.0
-        total_metrics = {
-            "rms_x": 0.0,
-            "rms_y": 0.0,
-            "rms_theta": 0.0,
-            "pixel_error": 0.0,
-        }
+        total_metrics = {"rms_x": 0.0, "rms_y": 0.0, "pixel_error": 0.0}
         count = 0
 
         t_fetch = t_to_dev = t_forward = t_loss = t_backward = t_step = 0.0
@@ -118,12 +114,7 @@ class Trainer:
     def evaluate(self, loader: DataLoader) -> Tuple[Dict[str, float], Dict[str, float]]:
         self.model.eval()
         total_loss = 0.0
-        total_metrics = {
-            "rms_x": 0.0,
-            "rms_y": 0.0,
-            "rms_theta": 0.0,
-            "pixel_error": 0.0,
-        }
+        total_metrics = {"rms_x": 0.0, "rms_y": 0.0, "pixel_error": 0.0}
         count = 0
 
         t_fetch = t_to_dev = t_forward = t_loss = 0.0
@@ -162,7 +153,6 @@ class Trainer:
             "val_loss": total_loss / max(count, 1),
             "val_rms_x": total_metrics["rms_x"] / max(count, 1),
             "val_rms_y": total_metrics["rms_y"] / max(count, 1),
-            "val_rms_theta": total_metrics["rms_theta"] / max(count, 1),
             "val_pixel_error": total_metrics["pixel_error"] / max(count, 1),
         }
         times = {
@@ -180,12 +170,10 @@ def create_history_dict() -> Dict[str, list]:
         "train_loss": [],
         "train_rms_x": [],
         "train_rms_y": [],
-        "train_rms_theta": [],
         "train_pixel_error": [],
         "val_loss": [],
         "val_rms_x": [],
         "val_rms_y": [],
-        "val_rms_theta": [],
         "val_pixel_error": [],
         "epoch_time": [],
     }
@@ -263,7 +251,11 @@ def load_localization_model(
     device: Optional[Union[str, torch.device]] = None,
     return_optimizer: bool = True,
 ) -> Tuple[LocalizationModel, Optional[torch.optim.Optimizer], Dict]:
-    add_safe_globals([DatasetConfig, ModelConfig, OptimConfig, SaveConfig, EarlyStopConfig])
+    try:
+        from pathlib import WindowsPath
+        add_safe_globals([DatasetConfig, ModelConfig, OptimConfig, SaveConfig, EarlyStopConfig, WindowsPath])
+    except ImportError:
+        add_safe_globals([DatasetConfig, ModelConfig, OptimConfig, SaveConfig, EarlyStopConfig])
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model_cfg: ModelConfig = checkpoint["model_cfg"]
     optim_cfg: OptimConfig = checkpoint["optim_cfg"]
@@ -319,6 +311,7 @@ def train_localization_model(
     random_seed: int = 42,
     save_cfg: Optional[SaveConfig] = SaveConfig(),
     early_stop_cfg: Optional[EarlyStopConfig] = EarlyStopConfig(),
+    subset_fraction: float = 1.0,
 ):
     root = Path(processed_raster_data_dir)
     if not root.exists():
@@ -327,6 +320,16 @@ def train_localization_model(
     sample_dirs = sorted([p for p in root.iterdir() if p.is_dir()])
     if not sample_dirs:
         raise ValueError(f"No sample subfolders found in {root}")
+
+    original_count = len(sample_dirs)
+    if subset_fraction <= 0:
+        raise ValueError("subset_fraction must be > 0")
+    if subset_fraction < 1.0:
+        rng = random.Random(random_seed)
+        rng.shuffle(sample_dirs)
+        subset_count = max(1, int(round(original_count * subset_fraction)))
+        sample_dirs = sample_dirs[:subset_count]
+        print(f"[Subset] Using {subset_count}/{original_count} samples (~{subset_fraction * 100:.1f}%).")
 
     dataset_cfg.sample_root = sample_dirs
     dataset_cfg.raster_builder = raster_builder_from_processed_dir
@@ -395,12 +398,10 @@ def train_localization_model(
         history["train_loss"].append(train_stats["loss"])
         history["train_rms_x"].append(train_stats["rms_x"])
         history["train_rms_y"].append(train_stats["rms_y"])
-        history["train_rms_theta"].append(train_stats["rms_theta"])
         history["train_pixel_error"].append(train_stats["pixel_error"])
         history["val_loss"].append(val_stats["val_loss"])
         history["val_rms_x"].append(val_stats["val_rms_x"])
         history["val_rms_y"].append(val_stats["val_rms_y"])
-        history["val_rms_theta"].append(val_stats["val_rms_theta"])
         history["val_pixel_error"].append(val_stats["val_pixel_error"])
 
         epoch_time = time.perf_counter() - epoch_start
@@ -453,31 +454,11 @@ def train_localization_model(
             f"train_loss={train_stats['loss']:.4f}  "
             f"| train_rms_x={train_stats['rms_x']:.3f} m  "
             f"| train_rms_y={train_stats['rms_y']:.3f} m  "
-            f"| train_rms_theta={train_stats['rms_theta']:.4f} rad  "
             f"| train_pixel_error={train_stats['pixel_error']:.3f} px  ||  "
             f"val_loss={val_stats['val_loss']:.4f}  "
             f"| val_rms_x={val_stats['val_rms_x']:.3f} m  "
             f"| val_rms_y={val_stats['val_rms_y']:.3f} m  "
-            f"| val_rms_theta={val_stats['val_rms_theta']:.4f} rad  "
             f"| val_pixel_error={val_stats['val_pixel_error']:.3f} px",
-        )
-        print(
-            "  ⏱️ Timing (per-batch averages): "
-            f"fetch={fmt(train_times['fetch_per_batch'])}, "
-            f"to_dev={fmt(train_times['to_device_per_batch'])}, "
-            f"forward={fmt(train_times['forward_per_batch'])}, "
-            f"loss={fmt(train_times['loss_per_batch'])}, "
-            f"backward={fmt(train_times['backward_per_batch'])}, "
-            f"step={fmt(train_times['step_per_batch'])}  "
-            f"(batches={int(train_times['batches'])})",
-        )
-        print(
-            "  ⏱️ Eval (per-batch averages): "
-            f"fetch={fmt(eval_times['eval_fetch_per_batch'])}, "
-            f"to_dev={fmt(eval_times['eval_to_device_per_batch'])}, "
-            f"forward={fmt(eval_times['eval_forward_per_batch'])}, "
-            f"loss={fmt(eval_times['eval_loss_per_batch'])}  "
-            f"(batches={int(eval_times['eval_batches'])})",
         )
         print(
             f"  ⏲️ Epoch wall time={epoch_time:.2f}s  "

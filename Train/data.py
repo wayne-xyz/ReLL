@@ -162,7 +162,7 @@ class GeoAlignRasterDataset(Dataset):
         else:
             max_shift_px = max(1, int(round(1.0 / max(res, 1e-6))))
 
-        rot_deg = self.config.max_rotation_deg if self.config.max_rotation_deg > 0 else 3.0
+        rot_deg = self.config.max_rotation_deg
 
         dx_px = random.randint(-max_shift_px, max_shift_px)
         dy_px = random.randint(-max_shift_px, max_shift_px)

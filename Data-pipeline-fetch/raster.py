@@ -18,7 +18,14 @@ def _fmt_seconds(sec: float) -> str:
     return f"{m}:{s:02d}"
 
 
-def raster_builder_from_sample_dir(sample_dir: Path):
+def raster_builder_from_sample_dir(sample_dir: Path,
+    *,
+    target_m_per_px: float | None = None,
+    splat_mode: str = "none",
+    sampling: float = 1.0,
+    coarsen_factor: int | None = None,
+    preview: bool = False,
+):
     """
     Builds raster data for a single sample directory using build_training_rasters.
 
@@ -52,11 +59,11 @@ def raster_builder_from_sample_dir(sample_dir: Path):
             dsm_points_path=dsm_path,
             imagery_path=img_path,
             # ---- optional knobs you can tune:
-            splat_mode="none",            # "none" | "bilinear" | "gaussian"
-            target_m_per_px=None,         # set (e.g., 0.2) to force output resolution; else keep source
-            sampling=1.0,                 # scale factor if you want quick low-res tests (e.g., 2.0 downsample 2x)
-            coarsen_factor=None,          # extra integer coarsening
-            preview=False,                # set True to visualize once
+            splat_mode=splat_mode,            # "none" | "bilinear" | "gaussian"
+            target_m_per_px=target_m_per_px, # set (e.g., 0.2) to force output resolution; else keep source
+            sampling=sampling,                 # scale factor if you want quick low-res tests (e.g., 2.0 downsample 2x)
+            coarsen_factor=coarsen_factor,    # extra integer coarsening
+            preview=preview,                  # set True to visualize once
         )
         print(f"Successfully built rasters for sample: {sample_dir}")
         return ras
@@ -859,26 +866,143 @@ def _resolve_point_path(path: Path) -> Path:
     return path
 
 
-def _compute_grid_from_points(df: pd.DataFrame, resolution: float, margin: float) -> tuple:
-    """
-    Determine raster width/height and transform covering the point cloud.
-    """
-    if resolution <= 0:
-        raise ValueError("resolution must be positive")
-    if df.empty:
-        raise ValueError("Point cloud is empty.")
 
-    x_min = float(df["x"].min()) - margin
-    x_max = float(df["x"].max()) + margin
-    y_min = float(df["y"].min()) - margin
-    y_max = float(df["y"].max()) + margin
 
-    width = max(1, int(np.ceil((x_max - x_min) / resolution)))
-    height = max(1, int(np.ceil((y_max - y_min) / resolution)))
+    def preview_sample_folder(
+        sample_dir: Path,
+        *,
+        target_m_per_px: float = 0.1,
+        splat_mode: str = "none",
+        sampling: float = 1.0,
+        coarsen_factor: int | None = None,
+        voxel_xy_m: float | None = None,
+    ):
+        """Preview preprocessed rasters stored in a sample directory."""
+        sample_dir = Path(sample_dir)
+        if not sample_dir.exists() or not sample_dir.is_dir():
+            raise FileNotFoundError(f"Sample folder not found: {sample_dir}")
 
-    transform = from_origin(x_min, y_max, resolution, resolution)
-    return transform, width, height
+        def _load_array(name: str):
+            path_local = sample_dir / name
+            if not path_local.exists():
+                print(f"[missing] {name}")
+                return None
+            try:
+                arr_local = np.load(path_local)
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                print(f"[error] Failed to load {name}: {exc}")
+                return None
+            print(f"[loaded] {name} -> shape={arr_local.shape}, dtype={arr_local.dtype}")
+            return arr_local
 
+        dsm_height = _load_array("dsm_height.npy")
+        gicp_height = _load_array("gicp_height.npy")
+        gicp_intensity = _load_array("gicp_intensity.npy")
+        imagery = _load_array("imagery.npy")
+        non_height = _load_array("non_aligned_height.npy")
+        non_intensity = _load_array("non_aligned_intensity.npy")
+
+        arrays = [
+            ("DSM Height", dsm_height, "terrain"),
+            ("GICP Height", gicp_height, "viridis"),
+            ("GICP Intensity", gicp_intensity, "gray"),
+            ("Imagery (RGB)", imagery, None),
+            ("Non-aligned Height", non_height, "magma"),
+            ("Non-aligned Intensity", non_intensity, "gray"),
+        ]
+
+        transform = None
+        resolution = None
+        print("\n" + "=" * 80)
+        print(f"Sample: {sample_dir}")
+        print("=" * 80)
+        for name in ["resolution.pkl", "transform.pkl", "profile.pkl", "metadata.pkl"]:
+            path_local = sample_dir / name
+            if not path_local.exists():
+                print(f"{name}: <missing>")
+                continue
+            try:
+                with open(path_local, "rb") as fh:
+                    data = pickle.load(fh)
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                print(f"{name}: <error reading pickle> ({exc})")
+                continue
+            print(f"{name}: {data}")
+            if name == "resolution.pkl":
+                try:
+                    resolution = float(data)
+                except Exception:
+                    resolution = None
+            if name == "transform.pkl":
+                transform = data
+
+        extent = None
+        grid_shape = None
+        for _, arr, _ in arrays:
+            if arr is None:
+                continue
+            if arr.ndim == 3:
+                grid_shape = (arr.shape[1], arr.shape[2])
+            elif arr.ndim == 2:
+                grid_shape = arr.shape
+            if grid_shape is not None:
+                break
+        if transform is not None and grid_shape is not None:
+            extent = _extent_from_transform(transform, grid_shape[1], grid_shape[0])
+
+        print("\nArray statistics:")
+        for title, arr, _ in arrays:
+            if arr is None:
+                continue
+            info = f"shape={arr.shape}, dtype={arr.dtype}"
+            if arr.ndim == 2:
+                finite = np.isfinite(arr)
+                if np.any(finite):
+                    vmin = float(np.nanmin(arr[finite]))
+                    vmax = float(np.nanmax(arr[finite]))
+                    mean = float(np.nanmean(arr[finite]))
+                else:
+                    vmin = vmax = mean = float('nan')
+                info += f", min={vmin:.3f}, max={vmax:.3f}, mean={mean:.3f}"
+            print(f"  {title:<24} {info}")
+
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12), constrained_layout=True)
+        axes = axes.flatten()
+
+        for ax, (title, arr, cmap) in zip(axes, arrays):
+            ax.set_title(title)
+            ax.set_axis_off()
+            if arr is None:
+                ax.text(0.5, 0.5, "Missing", ha="center", va="center", transform=ax.transAxes)
+                continue
+            if arr.ndim == 3:
+                chw = arr
+                if chw.shape[0] >= 3:
+                    rgb = np.transpose(chw[:3, :, :], (1, 2, 0))
+                else:
+                    rgb = np.transpose(np.repeat(chw[0:1, :, :], 3, axis=0), (1, 2, 0))
+                rgb = np.clip(rgb, 0.0, 1.0)
+                ax.imshow(rgb, extent=extent, origin="upper")
+            else:
+                finite = np.isfinite(arr)
+                if np.any(finite):
+                    vmin = float(np.nanpercentile(arr[finite], 1))
+                    vmax = float(np.nanpercentile(arr[finite], 99))
+                    if np.isclose(vmin, vmax):
+                        vmax = vmin + 1e-6
+                else:
+                    vmin, vmax = 0.0, 1.0
+                im = ax.imshow(arr, cmap=cmap or "viridis", extent=extent, origin="upper", vmin=vmin, vmax=vmax)
+                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+
+        for ax in axes[len(arrays):]:
+            ax.set_axis_off()
+
+        suptitle = f"Raster Preview: {sample_dir.name}"
+        if resolution is not None:
+            suptitle += f" | resolution ≈ {resolution:.3f} m/px"
+        plt.suptitle(suptitle)
+        plt.show()
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -886,7 +1010,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--data",
-        required=True,
+        required=False,
+        default=None,
         help="Path to a point cloud file (Parquet or LAS/LAZ).",
     )
     parser.add_argument(
@@ -925,11 +1050,44 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional XY voxel thinning size (meters) before rasterization.",
     )
+    parser.add_argument(
+        "--sampling",
+        type=float,
+        default=1.0,
+        help="Sampling factor to apply when reading imagery (0.5=upsample 2x, 2=downsample 2x).",
+    )
+    parser.add_argument(
+        "--sample-folder",
+        type=str,
+        default=None,
+        help="Path to a sample folder (e.g., Rell-sample-raster/<sample>). If provided, previews rasters from that folder at the requested target resolution.",
+    )
+    parser.add_argument(
+        "--preview-target-m-per-px",
+        type=float,
+        default=0.1,
+        help="Target meters-per-pixel for previewing imagery and rasters (default 0.1).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    # If --sample-folder provided, preview rasters from that sample at the requested resolution
+    if getattr(args, "sample_folder", None):
+        sample_path = Path(args.sample_folder)
+        print(f"Previewing sample folder: {sample_path} at {args.preview_target_m_per_px} m/px")
+        preview_sample_folder(
+            sample_path,
+            target_m_per_px=args.preview_target_m_per_px,
+            splat_mode=args.splat_mode,
+            sampling=args.sampling,
+            coarsen_factor=None,
+            voxel_xy_m=args.voxel_xy_m,
+        )
+        return
+
+    # Fallback: original single-point preview mode
     point_path = _resolve_point_path(Path(args.data))
 
     print(f"Using point cloud: {point_path}")

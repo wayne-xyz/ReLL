@@ -34,6 +34,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=None, help="Override training epochs.")
     parser.add_argument("--lr", type=float, default=None, help="Override optimizer learning rate.")
     parser.add_argument("--weight-decay", type=float, default=None, help="Override optimizer weight decay.")
+    parser.add_argument("--search-radius", type=int, default=None, help="Override model search radius in pixels.")
+    parser.add_argument("--embed-dim", type=int, default=None, help="Override model embedding dimension.")
+    parser.add_argument("--proj-dim", type=int, default=None, help="Override projection dimension.")
+    parser.add_argument("--encoder-depth", type=int, default=None, help="Override encoder depth.")
+    parser.add_argument("--stem-channels", type=int, default=None, help="Override stem channels.")
+    parser.add_argument(
+        "--subset-frac",
+        type=float,
+        default=1.0,
+        help="Optional fraction of samples to use for quick experiments (0 < frac <= 1).",
+    )
     return parser.parse_args()
 
 
@@ -61,6 +72,20 @@ def main() -> None:
         save_dir=args.save_dir,
     )
 
+    if args.embed_dim is not None:
+        model_cfg.embed_dim = args.embed_dim
+    if args.proj_dim is not None:
+        model_cfg.proj_dim = args.proj_dim
+    if args.encoder_depth is not None:
+        model_cfg.encoder_depth = args.encoder_depth
+    if args.stem_channels is not None:
+        model_cfg.stem_channels = args.stem_channels
+    if args.search_radius is not None:
+        model_cfg.search_radius = args.search_radius
+
+    dataset_cfg.max_translation_px = model_cfg.search_radius
+    dataset_cfg.max_rotation_deg = 0.0
+
     optim_cfg.device = _detect_device(args.device)
     if args.batch_size is not None:
         optim_cfg.batch_size = args.batch_size
@@ -70,6 +95,11 @@ def main() -> None:
         optim_cfg.lr = args.lr
     if args.weight_decay is not None:
         optim_cfg.weight_decay = args.weight_decay
+
+    save_cfg.monitor = "val_pixel_error"
+    save_cfg.mode = "min"
+    early_cfg.monitor = "val_pixel_error"
+    early_cfg.mode = "min"
 
     print(f"[Device] Training on: {optim_cfg.device}")
 
@@ -81,6 +111,7 @@ def main() -> None:
         optim_cfg=optim_cfg,
         save_cfg=save_cfg,
         early_stop_cfg=early_cfg,
+        subset_fraction=args.subset_frac,
     )
 
 

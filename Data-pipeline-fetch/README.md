@@ -39,6 +39,24 @@ Data-pipeline-fetch/
 
 **Standalone Design:** All processing code is in the `lib/` module, making this folder fully self-contained. No dependencies on external `Data_pipeline` or `ArgoverseLidar` folders.
 
+
+## Post-processing utilities
+
+### `raster2nd.py` – secondary height normalization
+
+After the main pipeline produces the raster dataset, `raster2nd.py` generates a second version where the LiDAR (GICP + non-aligned) and DSM height rasters are shifted so their 0.5th percentile is zero. Any residual negative values are clamped to zero.
+
+**Why this helps**
+- Normalizes height baselines across scenes (removes tall outliers from vegetation, clutter).
+- Produces rasters that are directly comparable for training / evaluation.
+- Keeps the original dataset intact while creating a shifted copy.
+
+**Usage**
+```bash
+python Data-pipeline-fetch/raster2nd.py --src_dir Rell-sample-raster --output_dir Rell-sample-raster2
+```
+Only `gicp_height.npy`, `dsm_height.npy`, and `non_aligned_height.npy` are modified; every other artifact is copied verbatim. After the shift the height rasters start at zero, preventing downstream models from seeing large regions filled with negative or offset values (which previously led to unbalanced inputs dominated by zero-fill).
+
 ## Quick Start
 
 ### 1. Install Dependencies

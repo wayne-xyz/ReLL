@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -10,327 +10,171 @@ from torch import Tensor, nn
 from config import ModelConfig
 
 
-def build_theta_grid(theta_bins: int, theta_range_deg: float) -> Tensor:
-    assert theta_bins >= 3, "theta_bins must be >= 3"
-    return torch.linspace(-theta_range_deg, theta_range_deg, theta_bins)
-
-
-def _make_conv_block(in_channels: int, out_channels: int, stride: int = 1) -> nn.Sequential:
-    return nn.Sequential(
-        nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False),
-        nn.InstanceNorm2d(out_channels, affine=True, track_running_stats=False),
-        nn.LeakyReLU(0.1, inplace=True),
-    )
-
-
-class HeightAttention(nn.Module):
-    def __init__(self, in_channels: int):
+class PyramidEncoder(nn.Module):
+    def __init__(self, in_channels: int, embed_dim: int, depth: int, base_channels: int) -> None:
         super().__init__()
-        mid = max(4, in_channels // 2)
-        self.mlp = nn.Sequential(
-            nn.Conv2d(in_channels, mid, kernel_size=1, bias=True),
+        stem_channels = max(base_channels // 2, 16)
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_channels, stem_channels, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.InstanceNorm2d(stem_channels, affine=True),
             nn.ReLU(inplace=True),
-            nn.Conv2d(mid, in_channels, kernel_size=1, bias=True),
-            nn.Sigmoid(),
         )
-        with torch.no_grad():
-            for m in self.mlp.modules():
-                if isinstance(m, nn.Conv2d):
-                    nn.init.kaiming_uniform_(m.weight, a=0.1)
-                    nn.init.zeros_(m.bias)
+
+        layers = []
+        in_channels_iter = stem_channels
+        for i in range(depth):
+            out_channels = min(embed_dim, base_channels * (2 ** i))
+            stride = 2 if i < depth - 1 else 1
+            block = nn.Sequential(
+                nn.Conv2d(in_channels_iter, out_channels, kernel_size=3, stride=stride, padding=1, bias=False),
+                nn.InstanceNorm2d(out_channels, affine=True),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False),
+                nn.InstanceNorm2d(out_channels, affine=True),
+                nn.ReLU(inplace=True),
+            )
+            layers.append(block)
+            in_channels_iter = out_channels
+        self.blocks = nn.Sequential(*layers)
+        self.head = nn.Conv2d(in_channels_iter, embed_dim, kernel_size=1, bias=False)
 
     def forward(self, x: Tensor) -> Tensor:
-        ctx = x.mean(dim=(2, 3), keepdim=True)
-        w = self.mlp(ctx)
-        return x * w
-
-
-class HeightAwareEncoder(nn.Module):
-    def __init__(self, in_channels: int, embed_dim: int, depth: int, base_channels: int = 64, use_height_attn: bool = True):
-        super().__init__()
-        layers: List[nn.Module] = []
-        channels = in_channels
-
-        out_channels = min(embed_dim, max(base_channels * (2 ** 0), 32))
-        layers.append(_make_conv_block(channels, out_channels, stride=1))
-        channels = out_channels
-
-        self.attn = HeightAttention(out_channels) if use_height_attn else None
-
-        for i in range(1, depth):
-            out_channels = min(embed_dim, max(base_channels * (2 ** i), 32))
-            layers.append(_make_conv_block(channels, out_channels, stride=1))
-            channels = out_channels
-
-        layers.append(_make_conv_block(channels, embed_dim, stride=1))
-        self.encoder = nn.Sequential(*layers)
-
-    def forward(self, x: Tensor) -> Tensor:
-        x = self.encoder[0](x)
-        if self.attn is not None:
-            x = self.attn(x)
-        for layer in self.encoder[1:]:
-            x = layer(x)
+        x = self.stem(x)
+        x = self.blocks(x)
+        x = self.head(x)
         return x
 
 
-class PyramidEncoder(nn.Module):
-    def __init__(self, in_channels: int, embed_dim: int, depth: int, base_channels: int = 64):
-        super().__init__()
-        layers: List[nn.Module] = []
-        channels = in_channels
-        for i in range(depth):
-            out_channels = min(embed_dim, max(base_channels * (2 ** i), 32))
-            layers.append(_make_conv_block(channels, out_channels, stride=1))
-            channels = out_channels
-        layers.append(_make_conv_block(channels, embed_dim, stride=1))
-        self.encoder = nn.Sequential(*layers)
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.encoder(x)
-
-
 class LocalizationModel(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.config = config
 
-        self.online_encoder = HeightAwareEncoder(
-            config.lidar_in_channels,
-            config.embed_dim,
-            config.encoder_depth,
-            use_height_attn=config.height_attention,
+        self.lidar_adapter = nn.Sequential(
+            nn.Conv2d(config.lidar_in_channels, config.stem_channels, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.InstanceNorm2d(config.stem_channels, affine=True),
+            nn.ReLU(inplace=True),
         )
-        self.geo_encoder = PyramidEncoder(
-            config.map_in_channels,
-            config.embed_dim,
-            config.encoder_depth,
+        self.map_adapter = nn.Sequential(
+            nn.Conv2d(config.map_in_channels, config.stem_channels, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.InstanceNorm2d(config.stem_channels, affine=True),
+            nn.ReLU(inplace=True),
         )
 
-        self.proj_online = nn.Conv2d(config.embed_dim, config.proj_dim, kernel_size=1, bias=False)
-        self.proj_geo = nn.Conv2d(config.embed_dim, config.proj_dim, kernel_size=1, bias=False)
+        self.shared_encoder = PyramidEncoder(
+            in_channels=config.stem_channels,
+            embed_dim=config.embed_dim,
+            depth=config.encoder_depth,
+            base_channels=config.encoder_base_channels,
+        )
 
-        self.theta_grid = build_theta_grid(config.theta_bins, config.theta_range_deg)
+        if config.translation_smoothing_kernel < 1 or config.translation_smoothing_kernel % 2 == 0:
+            raise ValueError("translation_smoothing_kernel must be a positive odd integer.")
+        self.projection = nn.Conv2d(config.embed_dim, config.proj_dim, kernel_size=1, bias=False)
+        self.translation_smoother = nn.Conv2d(
+            in_channels=1,
+            out_channels=1,
+            kernel_size=config.translation_smoothing_kernel,
+            padding=config.translation_smoothing_kernel // 2,
+            bias=False,
+        )
+        nn.init.constant_(self.translation_smoother.weight, 1.0 / (config.translation_smoothing_kernel ** 2))
+        self.translation_smoother.weight.requires_grad_(False)
+
+    def _encode(self, x: Tensor, adapter: nn.Module) -> Tensor:
+        x = adapter(x)
+        x = self.shared_encoder(x)
+        return x
 
     def _l2norm(self, emb: Tensor) -> Tensor:
         return torch.nan_to_num(F.normalize(emb, p=2, dim=1, eps=1e-6))
 
-    def compute_translation_cost(self, online: Tensor, geo: Tensor) -> Tensor:
+    def compute_translation_logits(self, online: Tensor, geo: Tensor) -> Tensor:
         radius = self.config.search_radius
-        pad = (radius, radius, radius, radius)
-        geo_padded = F.pad(geo, pad=pad, mode="constant", value=0.0)
-
+        geo_padded = F.pad(geo, pad=(radius, radius, radius, radius), mode="replicate")
         B, C, H, W = online.shape
-        _, _, H_p, W_p = geo_padded.shape
 
-        geo_inp = geo_padded.reshape(1, B * C, H_p, W_p)
-        kernel_wt = online
-        cost = F.conv2d(geo_inp, kernel_wt, padding=0, groups=B)
-        return cost.squeeze(0)
-
-    def compute_orientation_cost(self, online: Tensor, geo: Tensor) -> Tensor:
-        device = online.device
-        theta_grid_rad = self.theta_grid.to(device) * (math.pi / 180.0)
-
-        B, C, H, W = online.shape
-        K = theta_grid_rad.shape[0]
-        cos_t = torch.cos(theta_grid_rad)
-        sin_t = torch.sin(theta_grid_rad)
-
-        matrices = torch.zeros((B, K, 2, 3), device=device, dtype=online.dtype)
-        matrices[:, :, 0, 0] = cos_t.view(1, K)
-        matrices[:, :, 0, 1] = -sin_t.view(1, K)
-        matrices[:, :, 1, 0] = sin_t.view(1, K)
-        matrices[:, :, 1, 1] = cos_t.view(1, K)
-
-        matrices = matrices.view(B * K, 2, 3)
-        grid = F.affine_grid(matrices, [B * K, C, H, W], align_corners=False)
-
-        online_rep = online.repeat_interleave(K, dim=0)
-        geo_rep = geo.repeat_interleave(K, dim=0)
-
-        rotated = F.grid_sample(online_rep, grid, align_corners=False, mode="bilinear")
-        scores = (rotated * geo_rep).sum(dim=(1, 2, 3))
-        return scores.view(B, K)
+        patches = geo_padded.unfold(2, H, 1).unfold(3, W, 1)  # B, C, 2r+1, 2r+1, H, W
+        cost = torch.einsum("bchw,bcijhw->bij", online, patches)
+        cost = self.translation_smoother(cost.unsqueeze(1)).squeeze(1)
+        return cost
 
     def forward(self, lidar: Tensor, geospatial: Tensor) -> Dict[str, Tensor]:
-        lidar_feat_raw = self.online_encoder(lidar)
-        geo_feat_raw = self.geo_encoder(geospatial)
+        lidar_feat = self._encode(lidar, self.lidar_adapter)
+        map_feat = self._encode(geospatial, self.map_adapter)
 
-        lidar_feat = self._l2norm(self.proj_online(lidar_feat_raw))
-        geo_feat = self._l2norm(self.proj_geo(geo_feat_raw))
-        lidar_feat = torch.nan_to_num(lidar_feat, nan=0.0, posinf=1e6, neginf=-1e6)
-        geo_feat = torch.nan_to_num(geo_feat, nan=0.0, posinf=1e6, neginf=-1e6)
+        lidar_proj = self._l2norm(self.projection(lidar_feat))
+        map_proj = self._l2norm(self.projection(map_feat))
 
-        translation_cost = self.compute_translation_cost(lidar_feat, geo_feat)
-        orientation_cost = self.compute_orientation_cost(lidar_feat, geo_feat)
+        translation_logits = self.compute_translation_logits(lidar_proj, map_proj)
 
         return {
-            "online_embedding": lidar_feat,
-            "geospatial_embedding": geo_feat,
-            "translation_cost": translation_cost,
-            "orientation_cost": orientation_cost,
+            "translation_logits": translation_logits,
+            "lidar_embedding": lidar_proj,
+            "map_embedding": map_proj,
         }
 
 
-def three_point_log_parabola_subpixel(p1: Tensor, p2: Tensor, p3: Tensor) -> Tensor:
-    eps = 1e-12
-    y1 = (p1 + eps).log()
-    y2 = (p2 + eps).log()
-    y3 = (p3 + eps).log()
-    denom = (y1 - 2.0 * y2 + y3).clamp(min=1e-6)
-    delta = 0.5 * (y1 - y3) / denom
-    return delta.clamp(-1.0, 1.0)
-
-
-def gaussian_subpixel_refine_2d_scores(
-    scores: Tensor,
-    eps: float = 1e-6,
-    return_gaussian_params: bool = False,
-    vis: bool = False,
-    vis_n: int = 2,
-    vis_res: int = 41,
-) -> Tuple[Tensor, Tensor, Optional[Tensor], Optional[Tensor]]:
-    assert scores.ndim == 3, "scores must be [B,H,W]"
-    scores = scores.float()
-    B, H, W = scores.shape
-
-    flat = scores.view(B, -1)
-    idx = flat.argmax(dim=-1)
-    y0 = (idx // W).to(torch.int64)
-    x0 = (idx % W).to(torch.int64)
-
-    x = x0.clamp(1, W - 2)
-    y = y0.clamp(1, H - 2)
-
-    xs = torch.tensor([-1.0, 0.0, 1.0], device=scores.device)
-    ys = torch.tensor([-1.0, 0.0, 1.0], device=scores.device)
-    XX, YY = torch.meshgrid(xs, ys, indexing="xy")
-    xx = XX.reshape(-1)
-    yy = YY.reshape(-1)
-
-    phi = torch.stack([xx**2, yy**2, xx * yy, xx, yy, torch.ones_like(xx)], dim=-1)
-    Phi = phi.unsqueeze(0).expand(B, -1, -1)
-
-    patches = torch.stack(
-        [
-            scores[torch.arange(B), (y + dy).clamp(0, H - 1), (x + dx).clamp(0, W - 1)]
-            for dy in (-1, 0, 1)
-            for dx in (-1, 0, 1)
-        ],
-        dim=-1,
-    )
-
-    minv = patches.min(dim=-1, keepdim=True).values
-    y_pos = patches - minv + eps
-    y_log = torch.log(y_pos).unsqueeze(-1)
-
-    lam = 1e-6
-    Pt = Phi.transpose(1, 2)
-    PtP = torch.matmul(Pt, Phi)
-    reg = lam * torch.eye(6, device=scores.device).unsqueeze(0)
-    PtY = torch.matmul(Pt, y_log)
-    theta = torch.linalg.solve(PtP + reg, PtY).squeeze(-1)
-
-    a, b, c, d, e, f0 = [theta[:, i] for i in range(6)]
-
-    Hmat = torch.stack(
-        [
-            torch.stack([2 * a, c], dim=-1),
-            torch.stack([c, 2 * b], dim=-1),
-        ],
-        dim=-2,
-    )
-    rhs = -torch.stack([d, e], dim=-1).unsqueeze(-1)
-
-    xy = torch.linalg.solve(Hmat, rhs).squeeze(-1)
-    dx = xy[:, 0].clamp(-1.0, 1.0)
-    dy = xy[:, 1].clamp(-1.0, 1.0)
-
-    x_ref = x.float() + dx
-    y_ref = y.float() + dy
-
-    A = None
-    Sigma = None
-    if return_gaussian_params:
-        damp = 1e-9
-        I2 = torch.eye(2, device=scores.device).unsqueeze(0).expand(B, -1, -1)
-        Sigma = -torch.linalg.inv(Hmat + damp * I2)
-        logA = (a * dx * dx + b * dy * dy + c * dx * dy + d * dx + e * dy + f0)
-        A = torch.exp(logA)
-
-    return x_ref, y_ref, A, Sigma
-
-
 class LocalizationCriterion(nn.Module):
-    """
-    Pixel-level localization criterion without sub-pixel refinement.
-    """
-
-    def __init__(self, model_config: ModelConfig):
+    def __init__(self, model_config: ModelConfig) -> None:
         super().__init__()
         r = model_config.search_radius
         coords = torch.linspace(-r, r, steps=2 * r + 1)
         self.register_buffer("coord_grid_x", coords.view(1, 1, -1).repeat(1, 2 * r + 1, 1))
         self.register_buffer("coord_grid_y", coords.view(1, -1, 1).repeat(1, 1, 2 * r + 1))
         self.search_radius = r
-        self.temperature = float(max(model_config.translation_temperature, 1e-6))
-        theta_coords_deg = torch.linspace(
-            -model_config.theta_range_deg,
-            model_config.theta_range_deg,
-            steps=model_config.theta_bins,
-        )
-        self.register_buffer("theta_coords", theta_coords_deg * math.pi / 180.0)
-
+        self.sigma_px = max(float(model_config.gaussian_sigma_px), 1e-6)
         self.w_xy = float(model_config.w_xy)
-        self.w_theta = float(model_config.w_theta)
-
-    @staticmethod
-    def _wrap_angle(diff: Tensor) -> Tensor:
-        return (diff + math.pi).remainder(2 * math.pi) - math.pi
 
     def forward(self, predictions: Dict[str, Tensor], batch: Dict[str, Tensor]) -> Tuple[Tensor, Dict[str, Tensor]]:
-        T = predictions["translation_cost"]
-        O = predictions["orientation_cost"]
-        B, H, W = T.shape
+        logits = predictions["translation_logits"]
+        device = logits.device
+        B, H, W = logits.shape
 
-        res = batch["resolution"].to(T.device)
-        mu_gt = batch["pose_mu"].to(T.device)
+        resolution = batch["resolution"].to(device)
+        pose_mu = batch["pose_mu"].to(device)
 
-        prob = torch.softmax(T.view(B, -1) * self.temperature, dim=-1).view(B, H, W)
-        dx_px = (prob * self.coord_grid_x).sum(dim=(1, 2))
-        dy_px = (prob * self.coord_grid_y).sum(dim=(1, 2))
-        dx_m = dx_px * res
-        dy_m = dy_px * res
+        mu_px_x = pose_mu[:, 0] / resolution
+        mu_px_y = pose_mu[:, 1] / resolution
 
-        prob_theta = torch.softmax(O, dim=-1)
-        theta_ref = (prob_theta * self.theta_coords).sum(dim=-1)
+        coord_x = self.coord_grid_x.to(device).expand(B, -1, -1)
+        coord_y = self.coord_grid_y.to(device).expand(B, -1, -1)
 
-        err_x = dx_m - mu_gt[:, 0]
-        err_y = dy_m - mu_gt[:, 1]
-        err_theta = self._wrap_angle(theta_ref - mu_gt[:, 2])
+        dx = coord_x - mu_px_x.view(-1, 1, 1)
+        dy = coord_y - mu_px_y.view(-1, 1, 1)
+        gaussian = torch.exp(-0.5 * (dx ** 2 + dy ** 2) / (self.sigma_px ** 2 + 1e-9))
+        gaussian = gaussian / gaussian.sum(dim=(1, 2), keepdim=True).clamp_min(1e-9)
+
+        flat_logits = logits.view(B, -1)
+        log_prob = F.log_softmax(flat_logits, dim=-1)
+        loss_xy = -(gaussian.view(B, -1) * log_prob).sum(dim=-1).mean()
+
+        prob = log_prob.exp().view(B, H, W)
+        pred_idx = flat_logits.argmax(dim=-1)
+        width = 2 * self.search_radius + 1
+        pred_y = pred_idx // width
+        pred_x = pred_idx % width
+        pred_dx_px = pred_x.float() - self.search_radius
+        pred_dy_px = pred_y.float() - self.search_radius
+
+        pred_dx_m = pred_dx_px * resolution
+        pred_dy_m = pred_dy_px * resolution
+
+        err_x = pred_dx_m - pose_mu[:, 0]
+        err_y = pred_dy_m - pose_mu[:, 1]
+        pixel_err = torch.sqrt((err_x / (resolution + 1e-9)) ** 2 + (err_y / (resolution + 1e-9)) ** 2)
 
         rms_x = torch.sqrt(torch.mean(err_x ** 2) + 1e-9)
         rms_y = torch.sqrt(torch.mean(err_y ** 2) + 1e-9)
-        rms_theta = torch.sqrt(torch.mean(err_theta ** 2) + 1e-9)
 
-        pixel_err = torch.sqrt((err_x / (res + 1e-9)) ** 2 + (err_y / (res + 1e-9)) ** 2)
-        pixel_error_mean = pixel_err.mean()
-
-        loss = self.w_xy * (rms_x + rms_y) + self.w_theta * rms_theta
+        loss = self.w_xy * loss_xy
 
         metrics = {
             "rms_x": rms_x,
             "rms_y": rms_y,
-            "rms_theta": rms_theta,
-            "pixel_error": pixel_error_mean,
+            "pixel_error": pixel_err.mean(),
         }
         return loss, metrics
 
 
-__all__ = [
-    "LocalizationModel",
-    "LocalizationCriterion",
-    "build_theta_grid",
-]
-
+__all__ = ["LocalizationModel", "LocalizationCriterion"]
