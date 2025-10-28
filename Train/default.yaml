@@ -34,14 +34,14 @@ save:
   save_dir: ./checkpoints
   save_best: true
   save_last: true
-  monitor: val_pixel_error
+  monitor: val_loss
   mode: min
   filename_best: best_1000.ckpt
   filename_last: last_1000.ckpt
 
 early_stop:
   enabled: true
-  monitor: val_pixel_error
+  monitor: val_loss
   mode: min
   min_delta: 0.001
   patience: 50

@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--plot-metrics",
         action="store_true",
-        help="Save training curves (loss/RMS/pixel error) to an image inside --save-dir after training.",
+        help="Save training curves (loss/RMS metrics) to an image inside --save-dir after training.",
     )
     return parser.parse_args()
 
@@ -116,9 +116,9 @@ def main() -> None:
     if args.weight_decay is not None:
         optim_cfg.weight_decay = args.weight_decay
 
-    save_cfg.monitor = "val_pixel_error"
+    save_cfg.monitor = "val_loss"
     save_cfg.mode = "min"
-    early_cfg.monitor = "val_pixel_error"
+    early_cfg.monitor = "val_loss"
     early_cfg.mode = "min"
 
     print(f"[Device] Training on: {optim_cfg.device}")
@@ -151,7 +151,7 @@ def _export_training_plots(history: dict, save_dir: Path) -> None:
 
     epochs = list(range(1, len(history["train_loss"]) + 1))
 
-    fig, axes = plt.subplots(2, 3, figsize=(16, 8), sharex=True)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
     axes = axes.flatten()
 
     plots = [
@@ -159,7 +159,6 @@ def _export_training_plots(history: dict, save_dir: Path) -> None:
         ("RMS X (m)", "train_rms_x", "val_rms_x", "RMS X (m)"),
         ("RMS Y (m)", "train_rms_y", "val_rms_y", "RMS Y (m)"),
         ("RMS Theta (rad)", "train_rms_theta", "val_rms_theta", "RMS θ (rad)"),
-        ("Pixel Error (px)", "train_pixel_error", "val_pixel_error", "Pixel Error (px)"),
     ]
 
     for ax, (title, train_key, val_key, ylabel) in zip(axes, plots):
