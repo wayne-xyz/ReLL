@@ -264,11 +264,7 @@ def gaussian_subpixel_refine_2d_scores(
 
 class LocalizationCriterion(nn.Module):
     """
-    Sub-pixel via local fits:
-      - 2D translation: 2-D log-Gaussian fit around the peak → mean (x,y) and Σ.
-      - 1D yaw: 3-point log-parabola around peak → mean θ and std.
-
-    Loss = w_xy*L1(x,y) + w_theta*L1(theta) + alpha_xy*L1(sigma_x,sigma_y) + alpha_theta*L1(sigma_theta)
+    Pixel-level localization criterion without sub-pixel refinement.
     """
 
     def __init__(self, model_config: ModelConfig):
@@ -277,7 +273,8 @@ class LocalizationCriterion(nn.Module):
         coords = torch.linspace(-r, r, steps=2 * r + 1)
         self.register_buffer("coord_grid_x", coords.view(1, 1, -1).repeat(1, 2 * r + 1, 1))
         self.register_buffer("coord_grid_y", coords.view(1, -1, 1).repeat(1, 1, 2 * r + 1))
-
+        self.search_radius = r
+        self.temperature = float(max(model_config.translation_temperature, 1e-6))
         theta_coords_deg = torch.linspace(
             -model_config.theta_range_deg,
             model_config.theta_range_deg,
@@ -287,98 +284,46 @@ class LocalizationCriterion(nn.Module):
 
         self.w_xy = float(model_config.w_xy)
         self.w_theta = float(model_config.w_theta)
-        self.alpha_xy = float(model_config.alpha_xy)
-        self.alpha_theta = float(model_config.alpha_theta)
 
     @staticmethod
     def _wrap_angle(diff: Tensor) -> Tensor:
         return (diff + math.pi).remainder(2 * math.pi) - math.pi
 
-    def _subpixel_xy_from_scores(self, T: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
-        T = T.float()
-        T = T - T.amax(dim=(-1, -2), keepdim=True)
-        x_ref, y_ref, _, Sigma = gaussian_subpixel_refine_2d_scores(
-            T,
-            return_gaussian_params=True,
-        )
-        if Sigma is None:
-            B, _, _ = T.shape
-            Sigma = torch.full((B, 2, 2), 1e-4, device=T.device, dtype=T.dtype)
-        return x_ref, y_ref, Sigma
-
-    def _yaw_mean_std_from_scores(self, O: Tensor) -> Tuple[Tensor, Tensor]:
-        O = O.float()
-        B, K = O.shape
-        k0 = O.argmax(dim=-1)
-        km1 = (k0 - 1) % K
-        kp1 = (k0 + 1) % K
-        b = torch.arange(B, device=O.device)
-
-        Omax = O.max(dim=-1, keepdim=True).values
-        P = torch.exp(O - Omax)
-
-        p1, p2, p3 = P[b, km1], P[b, k0], P[b, kp1]
-        y1, y2, y3 = (p1 + 1e-12).log(), (p2 + 1e-12).log(), (p3 + 1e-12).log()
-        a = 0.5 * (y1 + y3 - 2.0 * y2)
-        delta = three_point_log_parabola_subpixel(p1, p2, p3)
-
-        sigma_bins = torch.sqrt(torch.clamp(-1.0 / (2.0 * a + 1e-12), min=1e-9))
-
-        theta_k = self.theta_coords
-        step = (theta_k[1] - theta_k[0]).item()
-        theta0 = theta_k[k0]
-        theta_ref = theta0 + delta * step
-        theta_std = sigma_bins * abs(step)
-        return theta_ref, theta_std
-
     def forward(self, predictions: Dict[str, Tensor], batch: Dict[str, Tensor]) -> Tuple[Tensor, Dict[str, Tensor]]:
-        T = predictions["translation_cost"].float()
-        O = predictions["orientation_cost"].float()
+        T = predictions["translation_cost"]
+        O = predictions["orientation_cost"]
         B, H, W = T.shape
 
         res = batch["resolution"].to(T.device)
         mu_gt = batch["pose_mu"].to(T.device)
-        sigma_gt = batch["pose_sigma"].to(T.device)
 
-        x_ref, y_ref, Sigma = self._subpixel_xy_from_scores(T)
-        cx, cy = (W - 1) / 2.0, (H - 1) / 2.0
-        dx_px = x_ref - cx
-        dy_px = y_ref - cy
+        prob = torch.softmax(T.view(B, -1) * self.temperature, dim=-1).view(B, H, W)
+        dx_px = (prob * self.coord_grid_x).sum(dim=(1, 2))
+        dy_px = (prob * self.coord_grid_y).sum(dim=(1, 2))
         dx_m = dx_px * res
         dy_m = dy_px * res
 
-        var_px_x = torch.clamp(Sigma[:, 0, 0], min=1e-12)
-        var_px_y = torch.clamp(Sigma[:, 1, 1], min=1e-12)
-        sigma_m_x = torch.sqrt(var_px_x) * res
-        sigma_m_y = torch.sqrt(var_px_y) * res
-
-        theta_ref, theta_std = self._yaw_mean_std_from_scores(O)
+        prob_theta = torch.softmax(O, dim=-1)
+        theta_ref = (prob_theta * self.theta_coords).sum(dim=-1)
 
         err_x = dx_m - mu_gt[:, 0]
         err_y = dy_m - mu_gt[:, 1]
         err_theta = self._wrap_angle(theta_ref - mu_gt[:, 2])
 
-        rms_eps = 1e-9
-        rms_x = torch.sqrt(torch.mean(err_x ** 2) + rms_eps)
-        rms_y = torch.sqrt(torch.mean(err_y ** 2) + rms_eps)
-        rms_theta = torch.sqrt(torch.mean(err_theta ** 2) + rms_eps)
+        rms_x = torch.sqrt(torch.mean(err_x ** 2) + 1e-9)
+        rms_y = torch.sqrt(torch.mean(err_y ** 2) + 1e-9)
+        rms_theta = torch.sqrt(torch.mean(err_theta ** 2) + 1e-9)
 
-        L_sig_xy = (sigma_m_x - sigma_gt[:, 0]).abs() + (sigma_m_y - sigma_gt[:, 1]).abs()
-        L_sig_th = (theta_std - sigma_gt[:, 2]).abs()
+        pixel_err = torch.sqrt((err_x / (res + 1e-9)) ** 2 + (err_y / (res + 1e-9)) ** 2)
+        pixel_error_mean = pixel_err.mean()
 
-        loss = (
-            self.w_xy * (rms_x + rms_y)
-            + self.w_theta * rms_theta
-            + self.alpha_xy * L_sig_xy.mean()
-            + self.alpha_theta * L_sig_th.mean()
-        )
+        loss = self.w_xy * (rms_x + rms_y) + self.w_theta * rms_theta
 
         metrics = {
-            "sigma_xy_mae": L_sig_xy.mean(),
-            "sigma_theta_mae": L_sig_th.mean(),
             "rms_x": rms_x,
             "rms_y": rms_y,
             "rms_theta": rms_theta,
+            "pixel_error": pixel_error_mean,
         }
         return loss, metrics
 
@@ -388,3 +333,4 @@ __all__ = [
     "LocalizationCriterion",
     "build_theta_grid",
 ]
+

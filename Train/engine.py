@@ -46,11 +46,10 @@ class Trainer:
         self.model.train()
         total_loss = 0.0
         total_metrics = {
-            "sigma_xy_mae": 0.0,
-            "sigma_theta_mae": 0.0,
             "rms_x": 0.0,
             "rms_y": 0.0,
             "rms_theta": 0.0,
+            "pixel_error": 0.0,
         }
         count = 0
 
@@ -120,11 +119,10 @@ class Trainer:
         self.model.eval()
         total_loss = 0.0
         total_metrics = {
-            "sigma_xy_mae": 0.0,
-            "sigma_theta_mae": 0.0,
             "rms_x": 0.0,
             "rms_y": 0.0,
             "rms_theta": 0.0,
+            "pixel_error": 0.0,
         }
         count = 0
 
@@ -162,11 +160,10 @@ class Trainer:
 
         stats = {
             "val_loss": total_loss / max(count, 1),
-            "val_sigma_xy_mae": total_metrics["sigma_xy_mae"] / max(count, 1),
-            "val_sigma_theta_mae": total_metrics["sigma_theta_mae"] / max(count, 1),
             "val_rms_x": total_metrics["rms_x"] / max(count, 1),
             "val_rms_y": total_metrics["rms_y"] / max(count, 1),
             "val_rms_theta": total_metrics["rms_theta"] / max(count, 1),
+            "val_pixel_error": total_metrics["pixel_error"] / max(count, 1),
         }
         times = {
             "eval_fetch_per_batch": t_fetch / max(count, 1),
@@ -181,17 +178,15 @@ class Trainer:
 def create_history_dict() -> Dict[str, list]:
     return {
         "train_loss": [],
-        "train_sigma_xy_mae": [],
-        "train_sigma_theta_mae": [],
         "train_rms_x": [],
         "train_rms_y": [],
         "train_rms_theta": [],
+        "train_pixel_error": [],
         "val_loss": [],
-        "val_sigma_xy_mae": [],
-        "val_sigma_theta_mae": [],
         "val_rms_x": [],
         "val_rms_y": [],
         "val_rms_theta": [],
+        "val_pixel_error": [],
         "epoch_time": [],
     }
 
@@ -398,17 +393,15 @@ def train_localization_model(
         eval_time_total = time.perf_counter() - eval_start
 
         history["train_loss"].append(train_stats["loss"])
-        history["train_sigma_xy_mae"].append(train_stats["sigma_xy_mae"])
-        history["train_sigma_theta_mae"].append(train_stats["sigma_theta_mae"])
         history["train_rms_x"].append(train_stats["rms_x"])
         history["train_rms_y"].append(train_stats["rms_y"])
         history["train_rms_theta"].append(train_stats["rms_theta"])
+        history["train_pixel_error"].append(train_stats["pixel_error"])
         history["val_loss"].append(val_stats["val_loss"])
-        history["val_sigma_xy_mae"].append(val_stats["val_sigma_xy_mae"])
-        history["val_sigma_theta_mae"].append(val_stats["val_sigma_theta_mae"])
         history["val_rms_x"].append(val_stats["val_rms_x"])
         history["val_rms_y"].append(val_stats["val_rms_y"])
         history["val_rms_theta"].append(val_stats["val_rms_theta"])
+        history["val_pixel_error"].append(val_stats["val_pixel_error"])
 
         epoch_time = time.perf_counter() - epoch_start
         history["epoch_time"].append(epoch_time)
@@ -458,17 +451,15 @@ def train_localization_model(
         print(
             f"Epoch {epochs_done:02d}/{total_epochs}: "
             f"train_loss={train_stats['loss']:.4f}  "
-            f"| train_sigma_xy_mae={train_stats['sigma_xy_mae']:.3f} m  "
-            f"| train_sigma_theta_mae={train_stats['sigma_theta_mae']:.4f} rad  "
             f"| train_rms_x={train_stats['rms_x']:.3f} m  "
             f"| train_rms_y={train_stats['rms_y']:.3f} m  "
-            f"| train_rms_theta={train_stats['rms_theta']:.4f} rad  ||  "
+            f"| train_rms_theta={train_stats['rms_theta']:.4f} rad  "
+            f"| train_pixel_error={train_stats['pixel_error']:.3f} px  ||  "
             f"val_loss={val_stats['val_loss']:.4f}  "
-            f"| val_sigma_xy_mae={val_stats['val_sigma_xy_mae']:.3f} m  "
-            f"| val_sigma_theta_mae={val_stats['val_sigma_theta_mae']:.4f} rad  "
             f"| val_rms_x={val_stats['val_rms_x']:.3f} m  "
             f"| val_rms_y={val_stats['val_rms_y']:.3f} m  "
-            f"| val_rms_theta={val_stats['val_rms_theta']:.4f} rad",
+            f"| val_rms_theta={val_stats['val_rms_theta']:.4f} rad  "
+            f"| val_pixel_error={val_stats['val_pixel_error']:.3f} px",
         )
         print(
             "  ⏱️ Timing (per-batch averages): "

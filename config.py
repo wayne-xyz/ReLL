@@ -48,6 +48,7 @@ class ModelConfig:
     w_theta: float = 0.5
     alpha_xy: float = 0.04
     alpha_theta: float = 0.20
+    translation_temperature: float = 10
 
 
 @dataclass
