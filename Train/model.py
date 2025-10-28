@@ -173,12 +173,15 @@ class LocalizationCriterion(nn.Module):
 
         rms_x = torch.sqrt(torch.mean(err_x ** 2) + 1e-9)
         rms_y = torch.sqrt(torch.mean(err_y ** 2) + 1e-9)
+        err_theta = -pose_mu[:, 2]
+        rms_theta = torch.sqrt(torch.mean(err_theta ** 2) + 1e-9)
 
         loss = self.w_xy * loss_xy
 
         metrics = {
             "rms_x": rms_x,
             "rms_y": rms_y,
+            "rms_theta": rms_theta,
             "pixel_error": pixel_err.mean(),
         }
         return loss, metrics

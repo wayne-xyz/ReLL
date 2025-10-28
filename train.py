@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--proj-dim", type=int, default=None, help="Override projection dimension.")
     parser.add_argument("--encoder-depth", type=int, default=None, help="Override encoder depth.")
     parser.add_argument("--stem-channels", type=int, default=None, help="Override stem channels.")
+    parser.add_argument("--max-rotation-deg", type=float, default=None, help="Override max rotation augmentation (deg).")
     parser.add_argument(
         "--config",
         type=Path,
@@ -102,7 +103,8 @@ def main() -> None:
         model_cfg.search_radius = args.search_radius
 
     dataset_cfg.max_translation_px = model_cfg.search_radius
-    dataset_cfg.max_rotation_deg = 0.0
+    if args.max_rotation_deg is not None:
+        dataset_cfg.max_rotation_deg = float(args.max_rotation_deg)
 
     optim_cfg.device = _detect_device(args.device)
     if args.batch_size is not None:
@@ -149,42 +151,31 @@ def _export_training_plots(history: dict, save_dir: Path) -> None:
 
     epochs = list(range(1, len(history["train_loss"]) + 1))
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
+    fig, axes = plt.subplots(2, 3, figsize=(16, 8), sharex=True)
     axes = axes.flatten()
 
-    # Loss
-    axes[0].plot(epochs, history.get("train_loss", []), label="train")
-    axes[0].plot(epochs, history.get("val_loss", []), label="val")
-    axes[0].set_title("Loss")
-    axes[0].set_ylabel("Loss")
-    axes[0].legend()
-    axes[0].grid(True, linestyle="--", alpha=0.4)
+    plots = [
+        ("Loss", "train_loss", "val_loss", "Loss"),
+        ("RMS X (m)", "train_rms_x", "val_rms_x", "RMS X (m)"),
+        ("RMS Y (m)", "train_rms_y", "val_rms_y", "RMS Y (m)"),
+        ("RMS Theta (rad)", "train_rms_theta", "val_rms_theta", "RMS θ (rad)"),
+        ("Pixel Error (px)", "train_pixel_error", "val_pixel_error", "Pixel Error (px)"),
+    ]
 
-    # RMS X
-    axes[1].plot(epochs, history.get("train_rms_x", []), label="train")
-    axes[1].plot(epochs, history.get("val_rms_x", []), label="val")
-    axes[1].set_title("RMS X (m)")
-    axes[1].legend()
-    axes[1].grid(True, linestyle="--", alpha=0.4)
+    for ax, (title, train_key, val_key, ylabel) in zip(axes, plots):
+        ax.plot(epochs, history.get(train_key, []), label="train")
+        ax.plot(epochs, history.get(val_key, []), label="val")
+        ax.set_title(title)
+        ax.set_ylabel(ylabel)
+        ax.set_xlabel("Epoch")
+        ax.legend()
+        ax.grid(True, linestyle="--", alpha=0.4)
 
-    # RMS Y
-    axes[2].plot(epochs, history.get("train_rms_y", []), label="train")
-    axes[2].plot(epochs, history.get("val_rms_y", []), label="val")
-    axes[2].set_title("RMS Y (m)")
-    axes[2].set_xlabel("Epoch")
-    axes[2].legend()
-    axes[2].grid(True, linestyle="--", alpha=0.4)
+    for ax in axes[len(plots):]:
+        ax.axis("off")
 
-    # Pixel error
-    axes[3].plot(epochs, history.get("train_pixel_error", []), label="train")
-    axes[3].plot(epochs, history.get("val_pixel_error", []), label="val")
-    axes[3].set_title("Pixel Error (px)")
-    axes[3].set_xlabel("Epoch")
-    axes[3].legend()
-    axes[3].grid(True, linestyle="--", alpha=0.4)
-
-    fig.suptitle("Training Progress", fontsize=14)
-    plt.tight_layout()
+    fig.suptitle("Training Progress", fontsize=16)
+    plt.tight_layout(rect=(0, 0, 1, 0.97))
     output_dir = Path(save_dir) if save_dir is not None else Path(".")
     output_dir.mkdir(parents=True, exist_ok=True)
     plot_path = output_dir / "training_metrics.png"
