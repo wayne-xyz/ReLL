@@ -11,7 +11,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
-from config import DatasetConfig, OptimConfig
+from .config import DatasetConfig, OptimConfig
 
 try:
     from torchvision.transforms.functional import InterpolationMode

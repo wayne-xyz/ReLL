@@ -26,3 +26,4 @@ model-save
 Train/__pycache__
 __pycache__
 Rell-sample-raster2
+train_log

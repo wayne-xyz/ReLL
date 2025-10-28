@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from config import ModelConfig
+from .config import ModelConfig
 
 
 class PyramidEncoder(nn.Module):

@@ -11,7 +11,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader, random_split
 from torch.serialization import add_safe_globals
 
-from config import (
+from .config import (
     DatasetConfig,
     EarlyStopConfig,
     ModelConfig,

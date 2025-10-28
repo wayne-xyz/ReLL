@@ -6,7 +6,7 @@ import os
 
 import torch
 
-from config import DEFAULT_DATA_ROOT, load_default_configs
+from Train.config import DEFAULT_DATA_ROOT, load_default_configs
 from Train.engine import train_localization_model
 
 
@@ -40,10 +40,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--encoder-depth", type=int, default=None, help="Override encoder depth.")
     parser.add_argument("--stem-channels", type=int, default=None, help="Override stem channels.")
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Optional YAML config file to override defaults (defaults to Train/default.yaml if present).",
+    )
+    parser.add_argument(
         "--subset-frac",
         type=float,
         default=1.0,
         help="Optional fraction of samples to use for quick experiments (0 < frac <= 1).",
+    )
+    parser.add_argument(
+        "--plot-metrics",
+        action="store_true",
+        help="Display training curves (loss/RMS/pixel error) in a pop-up window after training.",
     )
     return parser.parse_args()
 
@@ -68,9 +79,16 @@ def _detect_device(cli_device: str | None) -> str:
 
 def main() -> None:
     args = parse_args()
+    default_config_path = (Path(__file__).parent / "default.yaml")
+    config_path = args.config or (default_config_path if default_config_path.exists() else None)
+
     dataset_cfg, model_cfg, optim_cfg, save_cfg, early_cfg = load_default_configs(
         save_dir=args.save_dir,
+        config_path=config_path,
     )
+
+    if config_path is not None:
+        print(f"[Config] Loaded overrides from: {Path(config_path).resolve()}")
 
     if args.embed_dim is not None:
         model_cfg.embed_dim = args.embed_dim
@@ -104,7 +122,7 @@ def main() -> None:
     print(f"[Device] Training on: {optim_cfg.device}")
 
     data_root = args.data_root or DEFAULT_DATA_ROOT
-    train_localization_model(
+    _, _, _, _, history = train_localization_model(
         processed_raster_data_dir=data_root,
         dataset_cfg=dataset_cfg,
         model_cfg=model_cfg,
@@ -113,6 +131,61 @@ def main() -> None:
         early_stop_cfg=early_cfg,
         subset_fraction=args.subset_frac,
     )
+
+    if args.plot_metrics:
+        _show_training_plots(history)
+
+
+def _show_training_plots(history: dict) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        print(f"[Plot] Matplotlib is required for plotting ({exc}). Install it or drop --plot-metrics.")
+        return
+
+    if not history or "train_loss" not in history:
+        print("[Plot] No history available to plot.")
+        return
+
+    epochs = list(range(1, len(history["train_loss"]) + 1))
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
+    axes = axes.flatten()
+
+    # Loss
+    axes[0].plot(epochs, history.get("train_loss", []), label="train")
+    axes[0].plot(epochs, history.get("val_loss", []), label="val")
+    axes[0].set_title("Loss")
+    axes[0].set_ylabel("Loss")
+    axes[0].legend()
+    axes[0].grid(True, linestyle="--", alpha=0.4)
+
+    # RMS X
+    axes[1].plot(epochs, history.get("train_rms_x", []), label="train")
+    axes[1].plot(epochs, history.get("val_rms_x", []), label="val")
+    axes[1].set_title("RMS X (m)")
+    axes[1].legend()
+    axes[1].grid(True, linestyle="--", alpha=0.4)
+
+    # RMS Y
+    axes[2].plot(epochs, history.get("train_rms_y", []), label="train")
+    axes[2].plot(epochs, history.get("val_rms_y", []), label="val")
+    axes[2].set_title("RMS Y (m)")
+    axes[2].set_xlabel("Epoch")
+    axes[2].legend()
+    axes[2].grid(True, linestyle="--", alpha=0.4)
+
+    # Pixel error
+    axes[3].plot(epochs, history.get("train_pixel_error", []), label="train")
+    axes[3].plot(epochs, history.get("val_pixel_error", []), label="val")
+    axes[3].set_title("Pixel Error (px)")
+    axes[3].set_xlabel("Epoch")
+    axes[3].legend()
+    axes[3].grid(True, linestyle="--", alpha=0.4)
+
+    fig.suptitle("Training Progress", fontsize=14)
+    plt.tight_layout()
+    plt.show()
 
 
 if __name__ == "__main__":
