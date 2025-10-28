@@ -80,7 +80,7 @@ def _detect_device(cli_device: str | None) -> str:
 
 def main() -> None:
     args = parse_args()
-    default_config_path = (Path(__file__).parent / "default.yaml")
+    default_config_path = Path(__file__).parent / "Train" / "default.yaml"
     config_path = args.config or (default_config_path if default_config_path.exists() else None)
 
     dataset_cfg, model_cfg, optim_cfg, save_cfg, early_cfg = load_default_configs(
