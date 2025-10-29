@@ -251,11 +251,18 @@ def load_localization_model(
     device: Optional[Union[str, torch.device]] = None,
     return_optimizer: bool = True,
 ) -> Tuple[LocalizationModel, Optional[torch.optim.Optimizer], Dict]:
+    safe_types = [DatasetConfig, ModelConfig, OptimConfig, SaveConfig, EarlyStopConfig]
     try:
         from pathlib import WindowsPath
-        add_safe_globals([DatasetConfig, ModelConfig, OptimConfig, SaveConfig, EarlyStopConfig, WindowsPath])
+        safe_types.append(WindowsPath)
     except ImportError:
-        add_safe_globals([DatasetConfig, ModelConfig, OptimConfig, SaveConfig, EarlyStopConfig])
+        pass
+    try:
+        from pathlib import PosixPath
+        safe_types.append(PosixPath)
+    except ImportError:
+        pass
+    add_safe_globals(safe_types)
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model_cfg: ModelConfig = checkpoint["model_cfg"]
     optim_cfg: OptimConfig = checkpoint["optim_cfg"]
