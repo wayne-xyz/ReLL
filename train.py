@@ -105,6 +105,7 @@ def main() -> None:
     dataset_cfg.max_translation_px = model_cfg.search_radius
     if args.max_rotation_deg is not None:
         dataset_cfg.max_rotation_deg = float(args.max_rotation_deg)
+    model_cfg.theta_search_deg = max(int(round(dataset_cfg.max_rotation_deg)), 0)
 
     optim_cfg.device = _detect_device(args.device)
     if args.batch_size is not None:

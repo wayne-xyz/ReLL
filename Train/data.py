@@ -175,20 +175,10 @@ class GeoAlignRasterDataset(Dataset):
         dtheta_rad = math.radians(dtheta_deg)
 
         target_mu = torch.tensor([-dx_m, -dy_m, -dtheta_rad], dtype=torch.float32)
-        target_sigma = torch.tensor(
-            [
-                self.config.target_sigma_xy_m,
-                self.config.target_sigma_xy_m,
-                self.config.target_sigma_yaw_rad,
-            ],
-            dtype=torch.float32,
-        )
-
         return {
             "lidar": warped_lidar,
             "map": geospatial,
             "pose_mu": target_mu,
-            "pose_sigma": target_sigma,
             "resolution": resolution,
             "sample_idx": torch.tensor(idx, dtype=torch.int64),
         }

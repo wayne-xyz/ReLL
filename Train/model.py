@@ -88,6 +88,13 @@ class LocalizationModel(nn.Module):
         nn.init.constant_(self.translation_smoother.weight, 1.0 / (config.translation_smoothing_kernel ** 2))
         self.translation_smoother.weight.requires_grad_(False)
 
+        theta_range = max(int(round(getattr(config, "theta_search_deg", 0))), 0)
+        if theta_range > 0:
+            angles = torch.arange(-theta_range, theta_range + 1, dtype=torch.float32)
+        else:
+            angles = torch.zeros(1, dtype=torch.float32)
+        self.register_buffer("theta_candidates_deg", angles)
+
     def _encode(self, x: Tensor, adapter: nn.Module, encoder: nn.Module) -> Tensor:
         x = adapter(x)
         x = encoder(x)
@@ -100,11 +107,32 @@ class LocalizationModel(nn.Module):
         radius = self.config.search_radius
         geo_padded = F.pad(geo, pad=(radius, radius, radius, radius), mode="replicate")
         B, C, H, W = online.shape
-
-        patches = geo_padded.unfold(2, H, 1).unfold(3, W, 1)  # B, C, 2r+1, 2r+1, H, W
+        patches = geo_padded.unfold(2, H, 1).unfold(3, W, 1)
         cost = torch.einsum("bchw,bcijhw->bij", online, patches)
         cost = self.translation_smoother(cost.unsqueeze(1)).squeeze(1)
         return cost
+
+    def compute_theta_logits(self, online: Tensor, geo: Tensor) -> Tensor:
+        angles_deg = self.theta_candidates_deg.to(online.device, dtype=online.dtype)
+        if angles_deg.numel() == 1 and torch.allclose(angles_deg, torch.zeros_like(angles_deg)):
+            return (online * geo).sum(dim=(1, 2, 3), keepdim=True)
+
+        B = online.shape[0]
+        logits = []
+        for angle_deg in angles_deg:
+            angle_rad = angle_deg * math.pi / 180.0
+            cos_a = torch.cos(angle_rad)
+            sin_a = torch.sin(angle_rad)
+            theta = torch.zeros(B, 2, 3, device=online.device, dtype=online.dtype)
+            theta[:, 0, 0] = cos_a
+            theta[:, 0, 1] = -sin_a
+            theta[:, 1, 0] = sin_a
+            theta[:, 1, 1] = cos_a
+            grid = F.affine_grid(theta, size=geo.size(), align_corners=False)
+            rotated = F.grid_sample(geo, grid, align_corners=False, mode="bilinear", padding_mode="border")
+            sim = (online * rotated).sum(dim=(1, 2, 3))
+            logits.append(sim)
+        return torch.stack(logits, dim=1)
 
     def forward(self, lidar: Tensor, geospatial: Tensor) -> Dict[str, Tensor]:
         lidar_feat = self._encode(lidar, self.lidar_adapter, self.lidar_encoder)
@@ -114,9 +142,11 @@ class LocalizationModel(nn.Module):
         map_proj = self._l2norm(self.map_projection(map_feat))
 
         translation_logits = self.compute_translation_logits(lidar_proj, map_proj)
+        theta_logits = self.compute_theta_logits(lidar_proj, map_proj)
 
         return {
             "translation_logits": translation_logits,
+            "theta_logits": theta_logits,
             "lidar_embedding": lidar_proj,
             "map_embedding": map_proj,
         }
@@ -132,6 +162,15 @@ class LocalizationCriterion(nn.Module):
         self.search_radius = r
         self.sigma_px = max(float(model_config.gaussian_sigma_px), 1e-6)
         self.w_xy = float(model_config.w_xy)
+        self.w_theta = float(model_config.w_theta)
+        theta_range = max(int(round(getattr(model_config, "theta_search_deg", 0))), 0)
+        self.theta_range = theta_range
+        if theta_range > 0:
+            theta_coords = torch.arange(-theta_range, theta_range + 1, dtype=torch.float32)
+        else:
+            theta_coords = torch.zeros(1, dtype=torch.float32)
+        self.register_buffer("theta_coords_deg", theta_coords)
+        self.sigma_theta_deg = max(float(getattr(model_config, "gaussian_sigma_theta_deg", 1.0)), 1e-6)
 
     def forward(self, predictions: Dict[str, Tensor], batch: Dict[str, Tensor]) -> Tuple[Tensor, Dict[str, Tensor]]:
         logits = predictions["translation_logits"]
@@ -172,10 +211,26 @@ class LocalizationCriterion(nn.Module):
 
         rms_x = torch.sqrt(torch.mean(err_x ** 2) + 1e-9)
         rms_y = torch.sqrt(torch.mean(err_y ** 2) + 1e-9)
-        err_theta = -pose_mu[:, 2]
-        rms_theta = torch.sqrt(torch.mean(err_theta ** 2) + 1e-9)
 
-        loss = self.w_xy * loss_xy
+        if self.theta_range > 0:
+            theta_logits = predictions["theta_logits"].to(device)
+            theta_log_prob = F.log_softmax(theta_logits, dim=-1)
+            theta_coords = self.theta_coords_deg.to(device)
+            mu_theta_deg = pose_mu[:, 2] * (180.0 / math.pi)
+            theta_dx = theta_coords.view(1, -1) - mu_theta_deg.view(-1, 1)
+            theta_gaussian = torch.exp(-0.5 * (theta_dx ** 2) / (self.sigma_theta_deg ** 2))
+            theta_gaussian = theta_gaussian / theta_gaussian.sum(dim=1, keepdim=True).clamp_min(1e-9)
+            loss_theta = -(theta_gaussian * theta_log_prob).sum(dim=-1).mean()
+            pred_theta_idx = theta_logits.argmax(dim=-1)
+            pred_theta_deg = theta_coords[pred_theta_idx]
+            pred_theta_rad = pred_theta_deg * math.pi / 180.0
+            err_theta = pred_theta_rad - pose_mu[:, 2]
+            rms_theta = torch.sqrt(torch.mean(err_theta ** 2) + 1e-9)
+        else:
+            loss_theta = logits.new_tensor(0.0)
+            rms_theta = logits.new_tensor(0.0)
+
+        loss = self.w_xy * loss_xy + self.w_theta * loss_theta
 
         metrics = {
             "rms_x": rms_x,

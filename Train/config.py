@@ -7,7 +7,6 @@ The defaults mirror the values that previously lived at the bottom of
 Train/Train.py so the CLI can stay lightweight while allowing overrides.
 """
 
-import math
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
@@ -28,8 +27,6 @@ class DatasetConfig:
     cache_rasters: bool = True
     max_translation_px: int = 0
     max_rotation_deg: float = 0.0
-    target_sigma_xy_m: float = 0.2
-    target_sigma_yaw_rad: float = math.radians(1.0)
     raster_builder: Optional[Callable[[Path], Dict[str, Any]]] = None
     train_fraction: float = 0.9
 
@@ -44,9 +41,12 @@ class ModelConfig:
     encoder_base_channels: int = 64
     proj_dim: int = 32
     search_radius: int = 8
+    theta_search_deg: int = 0
     translation_smoothing_kernel: int = 1
     gaussian_sigma_px: float = 1.0
     w_xy: float = 1.0
+    w_theta: float = 1.0
+    gaussian_sigma_theta_deg: float = 1.0
 
 
 @dataclass
@@ -97,8 +97,6 @@ def default_dataset_config() -> DatasetConfig:
         cache_rasters=True,
         max_translation_px=4,
         max_rotation_deg=0.0,
-        target_sigma_xy_m=0.3,
-        target_sigma_yaw_rad=math.radians(0.5),
         raster_builder=None,
         train_fraction=0.9,
     )
@@ -114,8 +112,12 @@ def default_model_config() -> ModelConfig:
         encoder_base_channels=64,
         proj_dim=32,
         search_radius=4,
+        theta_search_deg=3,
         translation_smoothing_kernel=1,
         gaussian_sigma_px=1.0,
+        w_xy=1.0,
+        w_theta=1.0,
+        gaussian_sigma_theta_deg=1.0,
     )
 
 
