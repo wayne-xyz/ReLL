@@ -24,7 +24,7 @@ class PyramidEncoder(nn.Module):
         in_channels_iter = stem_channels
         for i in range(depth):
             out_channels = min(embed_dim, base_channels * (2 ** i))
-            stride = 2 if i < depth - 1 else 1
+            stride = 1  # keep spatial resolution for all stages
             block = nn.Sequential(
                 nn.Conv2d(in_channels_iter, out_channels, kernel_size=3, stride=stride, padding=1, bias=False),
                 nn.InstanceNorm2d(out_channels, affine=True),
