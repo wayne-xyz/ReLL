@@ -470,11 +470,11 @@ def train_localization_model(
             f"train_loss={train_stats['loss']:.4f}  "
             f"| train_rms_x={train_stats['rms_x']:.3f} m  "
             f"| train_rms_y={train_stats['rms_y']:.3f} m  "
-            f"| train_rms_theta={train_stats['rms_theta']:.4f} rad  ||  "
+            f"| train_rms_theta={train_stats['rms_theta']:.4f} deg  ||  "
             f"val_loss={val_stats['val_loss']:.4f}  "
             f"| val_rms_x={val_stats['val_rms_x']:.3f} m  "
             f"| val_rms_y={val_stats['val_rms_y']:.3f} m  "
-            f"| val_rms_theta={val_stats['val_rms_theta']:.4f} rad",
+            f"| val_rms_theta={val_stats['val_rms_theta']:.4f} deg",
         )
         print(
             f"  ⏲️ Epoch wall time={epoch_time:.2f}s  "

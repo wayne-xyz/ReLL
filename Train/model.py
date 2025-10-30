@@ -109,7 +109,7 @@ class LocalizationModel(nn.Module):
         B, C, H, W = online.shape
         patches = geo_padded.unfold(2, H, 1).unfold(3, W, 1)
         cost = torch.einsum("bchw,bcijhw->bij", online, patches)
-        cost = self.translation_smoother(cost.unsqueeze(1)).squeeze(1)
+        # cost = self.translation_smoother(cost.unsqueeze(1)).squeeze(1)
         return cost
 
     def compute_theta_logits(self, online: Tensor, geo: Tensor) -> Tensor:
@@ -163,6 +163,8 @@ class LocalizationCriterion(nn.Module):
         self.sigma_px = max(float(model_config.gaussian_sigma_px), 1e-6)
         self.w_xy = float(model_config.w_xy)
         self.w_theta = float(model_config.w_theta)
+        self.sigma_weight_xy = float(getattr(model_config, "sigma_weight_xy", 1.0))
+        self.sigma_weight_theta = float(getattr(model_config, "sigma_weight_theta", 1.0))
         theta_range = max(int(round(getattr(model_config, "theta_search_deg", 0))), 0)
         self.theta_range = theta_range
         if theta_range > 0:
@@ -177,58 +179,65 @@ class LocalizationCriterion(nn.Module):
         device = logits.device
         B, H, W = logits.shape
 
-        resolution = batch["resolution"].to(device)
+        resolution = batch["resolution"].to(device).view(-1)
         pose_mu = batch["pose_mu"].to(device)
-
-        mu_px_x = pose_mu[:, 0] / resolution
-        mu_px_y = pose_mu[:, 1] / resolution
 
         coord_x = self.coord_grid_x.to(device).expand(B, -1, -1)
         coord_y = self.coord_grid_y.to(device).expand(B, -1, -1)
 
-        dx = coord_x - mu_px_x.view(-1, 1, 1)
-        dy = coord_y - mu_px_y.view(-1, 1, 1)
-        gaussian = torch.exp(-0.5 * (dx ** 2 + dy ** 2) / (self.sigma_px ** 2 + 1e-9))
-        gaussian = gaussian / gaussian.sum(dim=(1, 2), keepdim=True).clamp_min(1e-9)
-
         flat_logits = logits.view(B, -1)
-        log_prob = F.log_softmax(flat_logits, dim=-1)
-        loss_xy = -(gaussian.view(B, -1) * log_prob).sum(dim=-1).mean()
+        prob = F.softmax(flat_logits, dim=-1).view(B, H, W)
 
-        prob = log_prob.exp().view(B, H, W)
-        pred_idx = flat_logits.argmax(dim=-1)
-        width = 2 * self.search_radius + 1
-        pred_y = pred_idx // width
-        pred_x = pred_idx % width
-        pred_dx_px = pred_x.float() - self.search_radius
-        pred_dy_px = pred_y.float() - self.search_radius
+        mu_hat_x_px = (prob * coord_x).sum(dim=(1, 2))
+        mu_hat_y_px = (prob * coord_y).sum(dim=(1, 2))
+        mu_hat_x_m = mu_hat_x_px * resolution
+        mu_hat_y_m = mu_hat_y_px * resolution
 
-        pred_dx_m = pred_dx_px * resolution
-        pred_dy_m = pred_dy_px * resolution
+        mu_gt_x = pose_mu[:, 0]
+        mu_gt_y = pose_mu[:, 1]
 
-        err_x = pred_dx_m - pose_mu[:, 0]
-        err_y = pred_dy_m - pose_mu[:, 1]
+        dx_px = coord_x - mu_hat_x_px.view(-1, 1, 1)
+        dy_px = coord_y - mu_hat_y_px.view(-1, 1, 1)
+        var_x_px = (prob * (dx_px ** 2)).sum(dim=(1, 2))
+        var_y_px = (prob * (dy_px ** 2)).sum(dim=(1, 2))
+        sigma_hat_x_m = torch.sqrt(var_x_px.clamp_min(1e-9)) * resolution
+        sigma_hat_y_m = torch.sqrt(var_y_px.clamp_min(1e-9)) * resolution
+        sigma_target_m = resolution * self.sigma_px
 
+        loss_mu_xy = torch.abs(mu_hat_x_m - mu_gt_x) + torch.abs(mu_hat_y_m - mu_gt_y)
+        loss_sigma_xy = torch.abs(sigma_hat_x_m - sigma_target_m) + torch.abs(sigma_hat_y_m - sigma_target_m)
+        loss_xy = (loss_mu_xy + self.sigma_weight_xy * loss_sigma_xy).mean()
+
+        err_x = mu_hat_x_m - mu_gt_x
+        err_y = mu_hat_y_m - mu_gt_y
         rms_x = torch.sqrt(torch.mean(err_x ** 2) + 1e-9)
         rms_y = torch.sqrt(torch.mean(err_y ** 2) + 1e-9)
+        sigma_err_x = torch.abs(sigma_hat_x_m - sigma_target_m).mean()
+        sigma_err_y = torch.abs(sigma_hat_y_m - sigma_target_m).mean()
 
         if self.theta_range > 0:
             theta_logits = predictions["theta_logits"].to(device)
-            theta_log_prob = F.log_softmax(theta_logits, dim=-1)
             theta_coords = self.theta_coords_deg.to(device)
-            mu_theta_deg = pose_mu[:, 2] * (180.0 / math.pi)
-            theta_dx = theta_coords.view(1, -1) - mu_theta_deg.view(-1, 1)
-            theta_gaussian = torch.exp(-0.5 * (theta_dx ** 2) / (self.sigma_theta_deg ** 2))
-            theta_gaussian = theta_gaussian / theta_gaussian.sum(dim=1, keepdim=True).clamp_min(1e-9)
-            loss_theta = -(theta_gaussian * theta_log_prob).sum(dim=-1).mean()
-            pred_theta_idx = theta_logits.argmax(dim=-1)
-            pred_theta_deg = theta_coords[pred_theta_idx]
-            pred_theta_rad = pred_theta_deg * math.pi / 180.0
-            err_theta = pred_theta_rad - pose_mu[:, 2]
+            theta_prob = F.softmax(theta_logits, dim=-1)
+            mu_hat_theta_deg = (theta_prob * theta_coords.view(1, -1)).sum(dim=-1)
+            mu_theta_gt = pose_mu[:, 2]
+
+            theta_diff = theta_coords.view(1, -1) - mu_hat_theta_deg.view(-1, 1)
+            var_theta = (theta_prob * (theta_diff ** 2)).sum(dim=-1)
+            sigma_hat_theta_deg = torch.sqrt(var_theta.clamp_min(1e-9))
+            sigma_theta_target = theta_logits.new_full((B,), self.sigma_theta_deg)
+
+            loss_theta_mu = torch.abs(mu_hat_theta_deg - mu_theta_gt)
+            loss_theta_sigma = torch.abs(sigma_hat_theta_deg - sigma_theta_target)
+            loss_theta = (loss_theta_mu + self.sigma_weight_theta * loss_theta_sigma).mean()
+
+            err_theta = mu_hat_theta_deg - mu_theta_gt
             rms_theta = torch.sqrt(torch.mean(err_theta ** 2) + 1e-9)
+            sigma_err_theta = torch.abs(sigma_hat_theta_deg - sigma_theta_target).mean()
         else:
             loss_theta = logits.new_tensor(0.0)
             rms_theta = logits.new_tensor(0.0)
+            sigma_err_theta = logits.new_tensor(0.0)
 
         loss = self.w_xy * loss_xy + self.w_theta * loss_theta
 
@@ -236,6 +245,9 @@ class LocalizationCriterion(nn.Module):
             "rms_x": rms_x,
             "rms_y": rms_y,
             "rms_theta": rms_theta,
+            "sigma_err_x": sigma_err_x,
+            "sigma_err_y": sigma_err_y,
+            "sigma_err_theta": sigma_err_theta,
         }
         return loss, metrics
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import pickle
 import random
 from pathlib import Path
@@ -172,9 +171,8 @@ class GeoAlignRasterDataset(Dataset):
 
         dx_m = dx_px * res
         dy_m = dy_px * res
-        dtheta_rad = math.radians(dtheta_deg)
 
-        target_mu = torch.tensor([-dx_m, -dy_m, -dtheta_rad], dtype=torch.float32)
+        target_mu = torch.tensor([-dx_m, -dy_m, -dtheta_deg], dtype=torch.float32)
         return {
             "lidar": warped_lidar,
             "map": geospatial,

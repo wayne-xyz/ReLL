@@ -23,11 +23,11 @@ model:
   gaussian_sigma_theta_deg: 1.0
 
 optim:
-  lr: 0.0003
+  lr: 0.0005
   weight_decay: 0.0001
   batch_size: 8
   num_workers: 2
-  epochs: 200
+  epochs: 400
   device: auto
 
 save:
@@ -45,6 +45,6 @@ early_stop:
   monitor: val_loss
   mode: min
   min_delta: 0.001
-  patience: 20
+  patience: 50
   warmup_epochs: 20
   restore_best: true

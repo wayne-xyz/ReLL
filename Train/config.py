@@ -47,6 +47,8 @@ class ModelConfig:
     w_xy: float = 1.0
     w_theta: float = 1.0
     gaussian_sigma_theta_deg: float = 1.0
+    sigma_weight_xy: float = 1.0
+    sigma_weight_theta: float = 1.0
 
 
 @dataclass
@@ -118,6 +120,8 @@ def default_model_config() -> ModelConfig:
         w_xy=1.0,
         w_theta=1.0,
         gaussian_sigma_theta_deg=1.0,
+        sigma_weight_xy=1.0,
+        sigma_weight_theta=1.0,
     )
 
 
