@@ -157,3 +157,11 @@ Method2:
   Backprop
       ↓
   Model Learns!
+
+
+
+# Better resolutoin better result .
+[Best] Saved model from epoch 82: val_loss=0.6440  | val_rms_theta=0.4426 deg
+       Pixel RMS (m):   0.135 x, 0.135 y
+       Softmax RMS (m): 0.092 x, 0.114 y
+       Gaussian RMS (m): 0.135 x, 0.135 y
