@@ -17,12 +17,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch import Tensor
+from torch.serialization import add_safe_globals
 
 # Add parent directory to path for imports
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from Train.config import ModelConfig
+from Train.config import DatasetConfig, ModelConfig, OptimConfig, SaveConfig, EarlyStopConfig
 from Train.data import raster_builder_from_processed_dir, replace_nan_with_zero
 from Train.model import LocalizationModel
 
@@ -33,22 +34,38 @@ def load_checkpoint(ckpt_path: Path, device: str = "cpu") -> Tuple[LocalizationM
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
     print(f"[Load] Loading checkpoint from: {ckpt_path}")
+
+    # Register safe types for unpickling config objects
+    safe_types = [DatasetConfig, ModelConfig, OptimConfig, SaveConfig, EarlyStopConfig]
+    try:
+        from pathlib import WindowsPath
+        safe_types.append(WindowsPath)
+    except ImportError:
+        pass
+    try:
+        from pathlib import PosixPath
+        safe_types.append(PosixPath)
+    except ImportError:
+        pass
+    add_safe_globals(safe_types)
+
+    # Load checkpoint
     checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
 
-    # Extract model config from checkpoint
-    if "model_config" not in checkpoint:
-        raise KeyError("Checkpoint missing 'model_config'. Cannot reconstruct model.")
+    # Extract model config from checkpoint (key is "model_cfg" not "model_config")
+    if "model_cfg" not in checkpoint:
+        raise KeyError(f"Checkpoint missing 'model_cfg'. Available keys: {list(checkpoint.keys())}")
 
-    model_cfg = checkpoint["model_config"]
+    model_cfg = checkpoint["model_cfg"]
     print(f"[Config] Model config loaded:")
     print(f"  - embed_dim: {model_cfg.embed_dim}")
     print(f"  - proj_dim: {model_cfg.proj_dim}")
     print(f"  - search_radius: {model_cfg.search_radius}")
     print(f"  - theta_search_deg: {model_cfg.theta_search_deg}")
 
-    # Reconstruct model
+    # Reconstruct model (state dict key is "model_state" not "model_state_dict")
     model = LocalizationModel(model_cfg)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model.load_state_dict(checkpoint["model_state"])
     model.to(device)
     model.eval()
 
@@ -172,36 +189,46 @@ def visualize_results(
     save_path: Path | None = None,
 ) -> None:
     """
-    Visualize embeddings and correlation heatmap.
+    Visualize projection features and correlation heatmap.
 
-    Shows:
-    1. LiDAR embedding (first 3 channels as RGB)
-    2. Map embedding (first 3 channels as RGB)
-    3. Cross-correlation heatmap with peak marker
+    Shows all 4 projection channels separately:
+    - Row 1: LiDAR projection ch0, ch1, ch2
+    - Row 2: LiDAR projection ch3, Map projection ch0, ch1
+    - Row 3: Map projection ch2, ch3, Cross-correlation heatmap
     """
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig, axes = plt.subplots(3, 3, figsize=(15, 15))
+    axes = axes.flatten()
 
-    # === 1. LiDAR Embedding Visualization ===
-    lidar_embed = results["lidar_embed"]  # [C, H, W]
-    # Take first 3 channels and normalize to [0, 1] for RGB display
-    lidar_rgb = lidar_embed[:3].permute(1, 2, 0).numpy()  # [H, W, 3]
-    lidar_rgb = (lidar_rgb - lidar_rgb.min()) / (lidar_rgb.max() - lidar_rgb.min() + 1e-9)
+    lidar_proj = results["lidar_proj"]  # [D, H, W] - D=proj_dim (usually 4)
+    map_proj = results["map_proj"]  # [D, H, W] - D=proj_dim (usually 4)
+    proj_dim = lidar_proj.shape[0]
 
-    axes[0].imshow(lidar_rgb)
-    axes[0].set_title(f"LiDAR Embedding\n(first 3/{lidar_embed.shape[0]} channels)", fontsize=12)
-    axes[0].axis("off")
+    # === LiDAR Projection Channels (0-3) ===
+    for i in range(min(proj_dim, 4)):
+        channel_data = lidar_proj[i].numpy()  # [H, W]
+        # Normalize to [0, 1] for display
+        channel_norm = (channel_data - channel_data.min()) / (channel_data.max() - channel_data.min() + 1e-9)
 
-    # === 2. Map Embedding Visualization ===
-    map_embed = results["map_embed"]  # [C, H, W]
-    # Take first 3 channels and normalize to [0, 1] for RGB display
-    map_rgb = map_embed[:3].permute(1, 2, 0).numpy()  # [H, W, 3]
-    map_rgb = (map_rgb - map_rgb.min()) / (map_rgb.max() - map_rgb.min() + 1e-9)
+        axes[i].imshow(channel_norm, cmap="viridis")
+        axes[i].set_title(f"LiDAR Proj Ch{i}", fontsize=11, fontweight="bold")
+        axes[i].axis("off")
+        # Add colorbar
+        plt.colorbar(axes[i].images[0], ax=axes[i], fraction=0.046, pad=0.04)
 
-    axes[1].imshow(map_rgb)
-    axes[1].set_title(f"Map Embedding\n(first 3/{map_embed.shape[0]} channels)", fontsize=12)
-    axes[1].axis("off")
+    # === Map Projection Channels (0-3) ===
+    for i in range(min(proj_dim, 4)):
+        channel_data = map_proj[i].numpy()  # [H, W]
+        # Normalize to [0, 1] for display
+        channel_norm = (channel_data - channel_data.min()) / (channel_data.max() - channel_data.min() + 1e-9)
 
-    # === 3. Cross-Correlation Heatmap ===
+        plot_idx = 4 + i  # Start after LiDAR channels
+        axes[plot_idx].imshow(channel_norm, cmap="viridis")
+        axes[plot_idx].set_title(f"Map Proj Ch{i}", fontsize=11, fontweight="bold")
+        axes[plot_idx].axis("off")
+        # Add colorbar
+        plt.colorbar(axes[plot_idx].images[0], ax=axes[plot_idx], fraction=0.046, pad=0.04)
+
+    # === Cross-Correlation Heatmap (last subplot) ===
     correlation_heatmap = results["correlation_heatmap"].numpy()  # [H_out, W_out]
 
     # Find peak
@@ -219,31 +246,34 @@ def visualize_results(
     offset_y_m = offset_y_px * resolution
     offset_x_m = offset_x_px * resolution
 
-    im = axes[2].imshow(correlation_heatmap, cmap="hot", interpolation="nearest")
-    axes[2].plot(peak_col, peak_row, "bx", markersize=15, markeredgewidth=3, label="Peak")
-    axes[2].plot(center_col, center_row, "g+", markersize=15, markeredgewidth=2, label="Center")
-    axes[2].set_title(
+    corr_ax = axes[8]  # Last subplot (3x3 grid, index 8)
+    im = corr_ax.imshow(correlation_heatmap, cmap="hot", interpolation="nearest")
+    corr_ax.plot(peak_col, peak_row, "bx", markersize=15, markeredgewidth=3, label="Peak")
+    corr_ax.plot(center_col, center_row, "g+", markersize=15, markeredgewidth=2, label="Center")
+    corr_ax.set_title(
         f"Cross-Correlation Heatmap\n"
         f"Window: {2*search_radius+1}×{2*search_radius+1} px\n"
         f"Peak: ({peak_row}, {peak_col}) = {peak_score:.4f}",
-        fontsize=12,
+        fontsize=11,
+        fontweight="bold",
     )
-    axes[2].set_xlabel(f"X offset (center at {center_col})")
-    axes[2].set_ylabel(f"Y offset (center at {center_row})")
-    axes[2].legend(loc="upper right")
-    plt.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
+    corr_ax.set_xlabel(f"X offset (center at {center_col})", fontsize=9)
+    corr_ax.set_ylabel(f"Y offset (center at {center_row})", fontsize=9)
+    corr_ax.legend(loc="upper right", fontsize=8)
+    plt.colorbar(im, ax=corr_ax, fraction=0.046, pad=0.04)
 
     # Add grid
-    axes[2].grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+    corr_ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
 
     plt.suptitle(
-        f"ReLL Localization Inference Visualization\n"
-        f"Detected Offset: ({offset_x_m:.3f}m, {offset_y_m:.3f}m) = ({offset_x_px}px, {offset_y_px}px)",
-        fontsize=14,
+        f"ReLL Localization Inference - All Projection Channels\n"
+        f"Detected Offset: ({offset_x_m:.3f}m, {offset_y_m:.3f}m) = ({offset_x_px}px, {offset_y_px}px)\n"
+        f"Proj dim: {proj_dim} channels (L2-normalized), Resolution: {resolution:.4f} m/px",
+        fontsize=13,
         fontweight="bold",
     )
 
-    plt.tight_layout(rect=[0, 0, 1, 0.94])
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
 
     if save_path:
         save_path.parent.mkdir(parents=True, exist_ok=True)
