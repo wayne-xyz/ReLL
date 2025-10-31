@@ -16,6 +16,7 @@ from typing import Dict, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 from torch.serialization import add_safe_globals
 
@@ -156,22 +157,31 @@ def compute_embeddings_and_correlation(
     lidar_proj = model._l2norm(model.lidar_projection(lidar_feat))
     map_proj = model._l2norm(model.map_projection(map_feat))
 
-    # Compute cross-correlation via sliding window
+    # Compute cross-correlation via sliding window (config radius)
     translation_logits = model.compute_translation_logits(lidar_proj, map_proj)
+
+    # Ensure we have at least ±10 px search radius for visualization consistency
+    extended_radius = max(int(model.config.search_radius), 10)
+    if extended_radius != int(model.config.search_radius):
+        # Recompute correlation with larger search window for visualization
+        extended_logits = _compute_translation_logits_with_radius(lidar_proj, map_proj, extended_radius)
+    else:
+        extended_logits = translation_logits
 
     # Remove batch dimension for visualization
     lidar_embed = lidar_feat.squeeze(0).cpu()  # [C, H, W]
     map_embed = map_feat.squeeze(0).cpu()  # [C, H, W]
     lidar_proj_vis = lidar_proj.squeeze(0).cpu()  # [D, H, W]
     map_proj_vis = map_proj.squeeze(0).cpu()  # [D, H, W]
-    correlation_heatmap = translation_logits.squeeze(0).cpu()  # [H_out, W_out]
+    correlation_heatmap = extended_logits.squeeze(0).cpu()  # [H_out, W_out]
+    base_heatmap = translation_logits.squeeze(0).cpu()
 
     print(f"[Inference] Embeddings computed:")
     print(f"  - LiDAR embedding: {lidar_embed.shape}")
     print(f"  - Map embedding: {map_embed.shape}")
     print(f"  - LiDAR projection: {lidar_proj_vis.shape}")
     print(f"  - Map projection: {map_proj_vis.shape}")
-    print(f"  - Correlation heatmap: {correlation_heatmap.shape}")
+    print(f"  - Correlation heatmap: {correlation_heatmap.shape} (visual radius = {extended_radius})")
 
     return {
         "lidar_embed": lidar_embed,
@@ -179,7 +189,91 @@ def compute_embeddings_and_correlation(
         "lidar_proj": lidar_proj_vis,
         "map_proj": map_proj_vis,
         "correlation_heatmap": correlation_heatmap,
+        "correlation_heatmap_base": base_heatmap,
+        "correlation_radius_px": extended_radius,
     }
+
+
+def _softmax_refinement(
+    heatmap: Tensor,
+) -> Tuple[Tensor, float, float, float, float]:
+    """Compute softmax probabilities, expectation, and std-dev in pixel space."""
+    probs = F.softmax(heatmap.view(-1), dim=0).view_as(heatmap)
+    H, W = probs.shape
+    center_row = H // 2
+    center_col = W // 2
+
+    grid_y = torch.arange(H, dtype=probs.dtype, device=probs.device) - center_row
+    grid_x = torch.arange(W, dtype=probs.dtype, device=probs.device) - center_col
+    coord_y = grid_y.view(-1, 1).expand(H, W)
+    coord_x = grid_x.view(1, -1).expand(H, W)
+
+    mu_x = (probs * coord_x).sum()
+    mu_y = (probs * coord_y).sum()
+
+    dx = coord_x - mu_x
+    dy = coord_y - mu_y
+    var_x = (probs * dx.pow(2)).sum()
+    var_y = (probs * dy.pow(2)).sum()
+
+    sigma_x = float(torch.sqrt(var_x.clamp(min=1e-9)).item())
+    sigma_y = float(torch.sqrt(var_y.clamp(min=1e-9)).item())
+
+    return probs.cpu(), float(mu_x.item()), float(mu_y.item()), sigma_x, sigma_y
+
+
+def _gaussian_peak_fit_single(heatmap: Tensor) -> Tuple[float, float]:
+    """Apply Gaussian peak fitting (matching training-time refinement) on a heatmap."""
+    H, W = heatmap.shape
+    peak_idx = int(torch.argmax(heatmap.view(-1)))
+    row = peak_idx // W
+    col = peak_idx % W
+
+    row_start = max(0, row - 1)
+    row_end = min(H, row + 2)
+    col_start = max(0, col - 1)
+    col_end = min(W, col + 2)
+    neighborhood = heatmap[row_start:row_end, col_start:col_end]
+
+    if neighborhood.shape != (3, 3):
+        return float(col - W // 2), float(row - H // 2)
+
+    log_neighborhood = torch.log(neighborhood.clamp(min=1e-10))
+    c_00 = float(log_neighborhood[1, 1].item())
+    c_m10 = float(log_neighborhood[1, 0].item())
+    c_p10 = float(log_neighborhood[1, 2].item())
+    c_0m1 = float(log_neighborhood[0, 1].item())
+    c_0p1 = float(log_neighborhood[2, 1].item())
+
+    d2_dx2 = c_m10 - 2.0 * c_00 + c_p10
+    d2_dy2 = c_0m1 - 2.0 * c_00 + c_0p1
+    d_dx = (c_p10 - c_m10) * 0.5
+    d_dy = (c_0p1 - c_0m1) * 0.5
+
+    dx = 0.0
+    dy = 0.0
+    if d2_dx2 < -1e-6:
+        dx = max(-1.0, min(1.0, -d_dx / d2_dx2))
+    if d2_dy2 < -1e-6:
+        dy = max(-1.0, min(1.0, -d_dy / d2_dy2))
+
+    refined_x = (col - W // 2) + dx
+    refined_y = (row - H // 2) + dy
+
+    return float(refined_x), float(refined_y)
+
+
+def _compute_translation_logits_with_radius(
+    lidar_proj: Tensor,
+    map_proj: Tensor,
+    radius: int,
+) -> Tensor:
+    """Compute translation logits with a custom radius (replicates model implementation)."""
+    geo_padded = F.pad(map_proj, pad=(radius, radius, radius, radius), mode="replicate")
+    B, C, H, W = lidar_proj.shape
+    patches = geo_padded.unfold(2, H, 1).unfold(3, W, 1)
+    cost = torch.einsum("bchw,bcijhw->bij", lidar_proj, patches)
+    return cost
 
 
 def visualize_results(
@@ -191,6 +285,7 @@ def visualize_results(
     lidar_intensity: Tensor | None = None,
     dsm_height: Tensor | None = None,
     imagery: Tensor | None = None,
+    gaussian_sigma_px: float | None = None,
 ) -> None:
     """
     Visualize projection features and correlation heatmap with original image preview.
@@ -208,9 +303,9 @@ def visualize_results(
     
     # Preview section (top row) - 4 subplots
     preview_axes = [fig.add_subplot(gs[0, i]) for i in range(4)]
-    
-    # Features section (bottom 3 rows) - 3x3 grid
-    feature_axes = [fig.add_subplot(gs[i+1, j]) for i in range(3) for j in range(3)]
+
+    # Features section (bottom 3 rows) - 3x4 grid
+    feature_axes = [fig.add_subplot(gs[i + 1, j]) for i in range(3) for j in range(4)]
     axes = feature_axes
 
     # === Preview Section: Original Images ===
@@ -238,6 +333,7 @@ def visualize_results(
         preview_axes[2].axis("off")
         plt.colorbar(preview_axes[2].images[0], ax=preview_axes[2], fraction=0.046, pad=0.04)
 
+    imagery_overlay_gray = None
     if imagery is not None:
         img = imagery.numpy() if isinstance(imagery, Tensor) else imagery
         # Handle different image formats
@@ -251,6 +347,10 @@ def visualize_results(
         preview_axes[3].imshow(img)
         preview_axes[3].set_title("Imagery", fontsize=12, fontweight="bold")
         preview_axes[3].axis("off")
+        if img.ndim == 3:
+            imagery_overlay_gray = img[..., :3].mean(axis=2)
+        elif img.ndim == 2:
+            imagery_overlay_gray = img.copy()
 
 
     lidar_proj = results["lidar_proj"]  # [D, H, W] - D=proj_dim (usually 4)
@@ -283,7 +383,11 @@ def visualize_results(
         plt.colorbar(axes[plot_idx].images[0], ax=axes[plot_idx], fraction=0.046, pad=0.04)
 
     # === Cross-Correlation Heatmap (last subplot) ===
-    correlation_heatmap = results["correlation_heatmap"].numpy()  # [H_out, W_out]
+    correlation_heatmap_tensor = results["correlation_heatmap"]
+    if not isinstance(correlation_heatmap_tensor, Tensor):
+        correlation_heatmap_tensor = torch.as_tensor(correlation_heatmap_tensor)
+    heatmap = correlation_heatmap_tensor.float()
+    correlation_heatmap = heatmap.cpu().numpy()  # [H_out, W_out]
 
     # Find peak
     peak_idx = np.argmax(correlation_heatmap)
@@ -300,13 +404,38 @@ def visualize_results(
     offset_y_m = offset_y_px * resolution
     offset_x_m = offset_x_px * resolution
 
-    corr_ax = axes[8]  # Last subplot (3x3 grid, index 8)
+    probs, softmax_mu_x_px, softmax_mu_y_px, softmax_sigma_x_px, softmax_sigma_y_px = _softmax_refinement(heatmap)
+    gaussian_mu_x_px, gaussian_mu_y_px = _gaussian_peak_fit_single(heatmap)
+
+    softmax_offset_x_m = softmax_mu_x_px * resolution
+    softmax_offset_y_m = softmax_mu_y_px * resolution
+    gaussian_offset_x_m = gaussian_mu_x_px * resolution
+    gaussian_offset_y_m = gaussian_mu_y_px * resolution
+
+    softmax_col = softmax_mu_x_px + center_col
+    softmax_row = softmax_mu_y_px + center_row
+    gaussian_col = gaussian_mu_x_px + center_col
+    gaussian_row = gaussian_mu_y_px + center_row
+
+    corr_ax = axes[8]  # First subplot of bottom-right quad
     im = corr_ax.imshow(correlation_heatmap, cmap="gray", interpolation="nearest")
     corr_ax.plot(peak_col, peak_row, "bx", markersize=15, markeredgewidth=3, label="Peak")
     corr_ax.plot(center_col, center_row, "g+", markersize=15, markeredgewidth=2, label="Center")
+    corr_ax.plot(softmax_col, softmax_row, "r^", markersize=10, markeredgewidth=1.5, label="Softmax μ")
+    corr_ax.plot(
+        gaussian_col,
+        gaussian_row,
+        "ys",
+        markersize=10,
+        markeredgewidth=1.5,
+        markerfacecolor="none",
+        label="Gaussian μ",
+    )
+    window_label = f"{W_out}×{H_out} px"
+    extended_radius_report = results.get("correlation_radius_px", W_out // 2)
     corr_ax.set_title(
         f"Cross-Correlation Heatmap\n"
-        f"Window: {2*search_radius+1}×{2*search_radius+1} px\n"
+        f"Window: {window_label} (radius={extended_radius_report})\n"
         f"Peak: ({peak_row}, {peak_col}) = {peak_score:.4f}",
         fontsize=11,
         fontweight="bold",
@@ -318,6 +447,187 @@ def visualize_results(
 
     # Add grid
     corr_ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+
+    softmax_ax = axes[9]
+    gaussian_ax = axes[10]
+    summary_ax = axes[11]
+
+    upsample_factor = 16
+    prob_dense = (
+        F.interpolate(
+            probs.unsqueeze(0).unsqueeze(0),
+            scale_factor=upsample_factor,
+            mode="bicubic",
+            align_corners=True,
+        )
+        .squeeze(0)
+        .squeeze(0)
+        .numpy()
+    )
+    x_dense = np.linspace(-center_col, center_col, prob_dense.shape[1])
+    y_dense = np.linspace(-center_row, center_row, prob_dense.shape[0])
+    X_dense, Y_dense = np.meshgrid(x_dense, y_dense, indexing="xy")
+
+    if imagery_overlay_gray is not None:
+        img_h, img_w = imagery_overlay_gray.shape
+        center_col_img = (img_w - 1) / 2.0
+        center_row_img = (img_h - 1) / 2.0
+        softmax_ax.imshow(imagery_overlay_gray, cmap="gray", alpha=0.95)
+        gaussian_ax.imshow(imagery_overlay_gray, cmap="gray", alpha=0.95)
+        softmax_ax.set_xlim(0, img_w)
+        gaussian_ax.set_xlim(0, img_w)
+        softmax_ax.set_ylim(img_h, 0)
+        gaussian_ax.set_ylim(img_h, 0)
+
+        X_plot = X_dense + center_col_img
+        Y_plot = Y_dense + center_row_img
+
+        def to_plot_x(offset: float) -> float:
+            return offset + center_col_img
+
+        def to_plot_y(offset: float) -> float:
+            return offset + center_row_img
+
+    else:
+        X_plot = X_dense
+        Y_plot = Y_dense
+        softmax_ax.set_facecolor("black")
+        gaussian_ax.set_facecolor("black")
+
+        def to_plot_x(offset: float) -> float:
+            return offset
+
+        def to_plot_y(offset: float) -> float:
+            return offset
+
+    softmax_cf = softmax_ax.contourf(
+        X_plot,
+        Y_plot,
+        prob_dense,
+        levels=40,
+        cmap="magma",
+        alpha=0.7,
+    )
+    softmax_ax.scatter(
+        to_plot_x(softmax_mu_x_px),
+        to_plot_y(softmax_mu_y_px),
+        marker="^",
+        color="white",
+        edgecolor="black",
+        s=80,
+        label="Softmax μ",
+    )
+    softmax_ax.scatter(
+        to_plot_x(gaussian_mu_x_px),
+        to_plot_y(gaussian_mu_y_px),
+        marker="s",
+        facecolors="none",
+        edgecolors="yellow",
+        s=90,
+        label="Gaussian μ",
+    )
+    search_window_half_x = center_col
+    search_window_half_y = center_row
+    x_low = to_plot_x(-search_window_half_x)
+    x_high = to_plot_x(search_window_half_x)
+    y_low = to_plot_y(-search_window_half_y)
+    y_high = to_plot_y(search_window_half_y)
+
+    if imagery_overlay_gray is not None:
+        x_low = float(np.clip(x_low, 0, img_w))
+        x_high = float(np.clip(x_high, 0, img_w))
+        y_low = float(np.clip(y_low, 0, img_h))
+        y_high = float(np.clip(y_high, 0, img_h))
+        softmax_ax.set_xlim(0, img_w)
+        softmax_ax.set_ylim(img_h, 0)
+    else:
+        softmax_ax.set_xlim(x_low, x_high)
+        softmax_ax.set_ylim(y_high, y_low)
+
+    softmax_ax.set_title(
+        (
+            "Softmax Probability on Imagery\n"
+            f"μ=({softmax_mu_x_px:+.2f}px, {softmax_mu_y_px:+.2f}px) / "
+            f"({softmax_offset_x_m:+.3f}m, {softmax_offset_y_m:+.3f}m)"
+        ),
+        fontsize=11,
+        fontweight="bold",
+    )
+    softmax_ax.set_xlabel("Image X (px)", fontsize=9)
+    softmax_ax.set_ylabel("Image Y (px)", fontsize=9)
+    softmax_ax.grid(True, alpha=0.3, linestyle=":", linewidth=0.6)
+    softmax_ax.legend(loc="upper right", fontsize=8)
+    plt.colorbar(softmax_cf, ax=softmax_ax, fraction=0.046, pad=0.04)
+
+    sigma_px = float(gaussian_sigma_px) if gaussian_sigma_px is not None else max(search_radius / 2.0, 1e-6)
+    gaussian_dense = np.exp(
+        -(
+            (X_dense - gaussian_mu_x_px) ** 2
+            + (Y_dense - gaussian_mu_y_px) ** 2
+        )
+        / (2.0 * sigma_px ** 2)
+    )
+    gaussian_dense *= correlation_heatmap.max()
+    gaussian_cf = gaussian_ax.contourf(
+        X_plot,
+        Y_plot,
+        gaussian_dense,
+        levels=40,
+        cmap="viridis",
+        alpha=0.7,
+    )
+    gaussian_ax.scatter(
+        to_plot_x(gaussian_mu_x_px),
+        to_plot_y(gaussian_mu_y_px),
+        marker="s",
+        facecolors="none",
+        edgecolors="white",
+        s=90,
+    )
+    gx_low = to_plot_x(-search_window_half_x)
+    gx_high = to_plot_x(search_window_half_x)
+    gy_low = to_plot_y(-search_window_half_y)
+    gy_high = to_plot_y(search_window_half_y)
+    if imagery_overlay_gray is not None:
+        gx_low = float(np.clip(gx_low, 0, img_w))
+        gx_high = float(np.clip(gx_high, 0, img_w))
+        gy_low = float(np.clip(gy_low, 0, img_h))
+        gy_high = float(np.clip(gy_high, 0, img_h))
+        gaussian_ax.set_xlim(0, img_w)
+        gaussian_ax.set_ylim(img_h, 0)
+    else:
+        gaussian_ax.set_xlim(gx_low, gx_high)
+        gaussian_ax.set_ylim(gy_high, gy_low)
+
+    gaussian_ax.set_title(
+        (
+            f"Gaussian Surface on Imagery (σ={sigma_px:.2f}px)\n"
+            f"μ=({gaussian_mu_x_px:+.2f}px, {gaussian_mu_y_px:+.2f}px) / "
+            f"({gaussian_offset_x_m:+.3f}m, {gaussian_offset_y_m:+.3f}m)"
+        ),
+        fontsize=11,
+        fontweight="bold",
+    )
+    gaussian_ax.set_xlabel("Image X (px)", fontsize=9)
+    gaussian_ax.set_ylabel("Image Y (px)", fontsize=9)
+    gaussian_ax.grid(True, alpha=0.3, linestyle=":", linewidth=0.6)
+    plt.colorbar(gaussian_cf, ax=gaussian_ax, fraction=0.046, pad=0.04)
+
+    summary_ax.axis("off")
+    summary_lines = [
+        f"Pixel peak: ({offset_x_px:+.1f}px, {offset_y_px:+.1f}px) / ({offset_x_m:+.3f}m, {offset_y_m:+.3f}m)",
+        f"Softmax μ: ({softmax_mu_x_px:+.2f}px, {softmax_mu_y_px:+.2f}px) / ({softmax_offset_x_m:+.3f}m, {softmax_offset_y_m:+.3f}m)",
+        f"Gaussian μ: ({gaussian_mu_x_px:+.2f}px, {gaussian_mu_y_px:+.2f}px) / ({gaussian_offset_x_m:+.3f}m, {gaussian_offset_y_m:+.3f}m)",
+        f"Softmax σ: ({softmax_sigma_x_px:.2f}px, {softmax_sigma_y_px:.2f}px)",
+    ]
+    summary_ax.text(
+        0.02,
+        0.95,
+        "\n".join(summary_lines),
+        fontsize=11,
+        fontweight="bold",
+        va="top",
+    )
 
     plt.suptitle(
         f"ReLL Localization Inference - All Projection Channels\n"
@@ -419,12 +729,13 @@ def main() -> None:
     visualize_results(
         results,
         resolution,
-        model_cfg.search_radius,
+        int(results.get("correlation_radius_px", model_cfg.search_radius)),
         save_path=args.save,
         lidar_height=lidar_height,
         lidar_intensity=lidar_intensity,
         dsm_height=dsm_height,
         imagery=imagery,
+        gaussian_sigma_px=getattr(model_cfg, "gaussian_sigma_px", None),
     )
 
     print("\n[Done] Inference visualization complete!")
