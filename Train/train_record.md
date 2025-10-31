@@ -165,3 +165,8 @@ Method2:
        Pixel RMS (m):   0.135 x, 0.135 y
        Softmax RMS (m): 0.092 x, 0.114 y
        Gaussian RMS (m): 0.135 x, 0.135 y
+
+
+# Data fillment rate , bigger range.0.3047re 329x329 ,100mx100m will have lower lidar points fillment than the 150x150 , 30x30 0.2re
+
+# Edge case 000VFSWWAAkobywItdrErpC6fedKDWg4_020

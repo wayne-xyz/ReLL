@@ -187,17 +187,71 @@ def visualize_results(
     resolution: float,
     search_radius: int,
     save_path: Path | None = None,
+    lidar_height: Tensor | None = None,
+    lidar_intensity: Tensor | None = None,
+    dsm_height: Tensor | None = None,
+    imagery: Tensor | None = None,
 ) -> None:
     """
-    Visualize projection features and correlation heatmap.
+    Visualize projection features and correlation heatmap with original image preview.
 
-    Shows all 4 projection channels separately:
-    - Row 1: LiDAR projection ch0, ch1, ch2
-    - Row 2: LiDAR projection ch3, Map projection ch0, ch1
-    - Row 3: Map projection ch2, ch3, Cross-correlation heatmap
+    Shows:
+    - Top section: Original images (LiDAR height, intensity, DSM, imagery)
+    - Bottom section: All 4 projection channels separately:
+      - Row 1: LiDAR projection ch0, ch1, ch2
+      - Row 2: LiDAR projection ch3, Map projection ch0, ch1
+      - Row 3: Map projection ch2, ch3, Cross-correlation heatmap
     """
-    fig, axes = plt.subplots(3, 3, figsize=(15, 15))
-    axes = axes.flatten()
+    # Create figure with two sections: preview (1x4) + features (3x3)
+    fig = plt.figure(figsize=(28, 20))
+    gs = fig.add_gridspec(4, 4, hspace=0.35, wspace=0.3)
+    
+    # Preview section (top row) - 4 subplots
+    preview_axes = [fig.add_subplot(gs[0, i]) for i in range(4)]
+    
+    # Features section (bottom 3 rows) - 3x3 grid
+    feature_axes = [fig.add_subplot(gs[i+1, j]) for i in range(3) for j in range(3)]
+    axes = feature_axes
+
+    # === Preview Section: Original Images ===
+    if lidar_height is not None:
+        h = lidar_height.numpy() if isinstance(lidar_height, Tensor) else lidar_height
+        h_norm = (h - h.min()) / (h.max() - h.min() + 1e-9)
+        preview_axes[0].imshow(h_norm, cmap="viridis")
+        preview_axes[0].set_title("LiDAR Height", fontsize=12, fontweight="bold")
+        preview_axes[0].axis("off")
+        plt.colorbar(preview_axes[0].images[0], ax=preview_axes[0], fraction=0.046, pad=0.04)
+
+    if lidar_intensity is not None:
+        intensity = lidar_intensity.numpy() if isinstance(lidar_intensity, Tensor) else lidar_intensity
+        intensity_norm = (intensity - intensity.min()) / (intensity.max() - intensity.min() + 1e-9)
+        preview_axes[1].imshow(intensity_norm, cmap="gray")
+        preview_axes[1].set_title("LiDAR Intensity", fontsize=12, fontweight="bold")
+        preview_axes[1].axis("off")
+        plt.colorbar(preview_axes[1].images[0], ax=preview_axes[1], fraction=0.046, pad=0.04)
+
+    if dsm_height is not None:
+        dsm = dsm_height.numpy() if isinstance(dsm_height, Tensor) else dsm_height
+        dsm_norm = (dsm - dsm.min()) / (dsm.max() - dsm.min() + 1e-9)
+        preview_axes[2].imshow(dsm_norm, cmap="plasma")
+        preview_axes[2].set_title("DSM Height", fontsize=12, fontweight="bold")
+        preview_axes[2].axis("off")
+        plt.colorbar(preview_axes[2].images[0], ax=preview_axes[2], fraction=0.046, pad=0.04)
+
+    if imagery is not None:
+        img = imagery.numpy() if isinstance(imagery, Tensor) else imagery
+        # Handle different image formats
+        if img.shape[0] == 3:  # CHW format
+            img = img.transpose(1, 2, 0)
+        elif img.shape[2] == 3:  # HWC format
+            pass
+        # Normalize if needed
+        if img.max() > 1.0:
+            img = img / 255.0
+        preview_axes[3].imshow(img)
+        preview_axes[3].set_title("Imagery", fontsize=12, fontweight="bold")
+        preview_axes[3].axis("off")
+
 
     lidar_proj = results["lidar_proj"]  # [D, H, W] - D=proj_dim (usually 4)
     map_proj = results["map_proj"]  # [D, H, W] - D=proj_dim (usually 4)
@@ -209,7 +263,7 @@ def visualize_results(
         # Normalize to [0, 1] for display
         channel_norm = (channel_data - channel_data.min()) / (channel_data.max() - channel_data.min() + 1e-9)
 
-        axes[i].imshow(channel_norm, cmap="viridis")
+        axes[i].imshow(channel_norm, cmap="gray")
         axes[i].set_title(f"LiDAR Proj Ch{i}", fontsize=11, fontweight="bold")
         axes[i].axis("off")
         # Add colorbar
@@ -222,7 +276,7 @@ def visualize_results(
         channel_norm = (channel_data - channel_data.min()) / (channel_data.max() - channel_data.min() + 1e-9)
 
         plot_idx = 4 + i  # Start after LiDAR channels
-        axes[plot_idx].imshow(channel_norm, cmap="viridis")
+        axes[plot_idx].imshow(channel_norm, cmap="gray")
         axes[plot_idx].set_title(f"Map Proj Ch{i}", fontsize=11, fontweight="bold")
         axes[plot_idx].axis("off")
         # Add colorbar
@@ -247,7 +301,7 @@ def visualize_results(
     offset_x_m = offset_x_px * resolution
 
     corr_ax = axes[8]  # Last subplot (3x3 grid, index 8)
-    im = corr_ax.imshow(correlation_heatmap, cmap="hot", interpolation="nearest")
+    im = corr_ax.imshow(correlation_heatmap, cmap="gray", interpolation="nearest")
     corr_ax.plot(peak_col, peak_row, "bx", markersize=15, markeredgewidth=3, label="Peak")
     corr_ax.plot(center_col, center_row, "g+", markersize=15, markeredgewidth=2, label="Center")
     corr_ax.set_title(
@@ -334,14 +388,44 @@ def main() -> None:
     geospatial = sample["map"].to(args.device)
     resolution = sample["resolution"]
 
+    # Extract original image data for preview
+    rasters = raster_builder_from_processed_dir(args.sample)
+    if args.lidar_variant.lower() == "gicp":
+        lidar_height = torch.tensor(rasters["gicp_height"], dtype=torch.float32)
+        lidar_intensity = torch.tensor(rasters["gicp_intensity"], dtype=torch.float32)
+    else:
+        lidar_height = torch.tensor(rasters["non_aligned_height"], dtype=torch.float32)
+        lidar_intensity = torch.tensor(rasters["non_aligned_intensity"], dtype=torch.float32)
+    
+    dsm_height = torch.tensor(rasters["dsm_height"], dtype=torch.float32)
+    imagery = torch.tensor(rasters["imagery"], dtype=torch.float32)
+    
+    # Ensure imagery is RGB only
+    if imagery.shape[0] > 3:
+        imagery = imagery[:3, :, :]
+    
+    # Clean NaN values
+    lidar_height, _ = replace_nan_with_zero(lidar_height)
+    lidar_intensity, _ = replace_nan_with_zero(lidar_intensity)
+    dsm_height, _ = replace_nan_with_zero(dsm_height)
+
     print(f"\n[Inference] Running model on {args.device}...")
 
     # Compute embeddings and correlation
     results = compute_embeddings_and_correlation(model, lidar, geospatial)
 
-    # Visualize
+    # Visualize with original image preview
     print(f"\n[Visualize] Creating visualization...")
-    visualize_results(results, resolution, model_cfg.search_radius, save_path=args.save)
+    visualize_results(
+        results,
+        resolution,
+        model_cfg.search_radius,
+        save_path=args.save,
+        lidar_height=lidar_height,
+        lidar_intensity=lidar_intensity,
+        dsm_height=dsm_height,
+        imagery=imagery,
+    )
 
     print("\n[Done] Inference visualization complete!")
 
