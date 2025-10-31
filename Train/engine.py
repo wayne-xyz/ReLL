@@ -477,9 +477,7 @@ def train_localization_model(
             f"| val_rms_theta={val_stats['val_rms_theta']:.4f} deg",
         )
         print(
-            f"  ⏲️ Epoch wall time={epoch_time:.2f}s  "
-            f"| eval total={eval_time_total:.2f}s  "
-            f"| ckpt={ckpt_time:.2f}s  "
+            f"Epoch time={epoch_time:.2f}s  "
             f"| remaining≈{_fmt_secs(est_remaining_secs)}  "
             f"(ETA ~ {finish_at_dt.strftime('%Y-%m-%d %H:%M:%S')})",
         )
