@@ -128,3 +128,32 @@ Norm	Best epoch	val_loss (best)	val_xy (m)	val_th (rad)
 BN	27	2.1953	1.0840	0.0274
 IN	19	2.0109	0.9900	0.0315
 GN	29	2.3933	1.1880	0.0173
+
+
+Method:
+ Softmax (Convert to Probabilities)
+```python
+flat_logits = logits.view(B, -1)  # Flatten: (B, 9×9) = (B, 81)
+prob = F.softmax(flat_logits, dim=-1).view(B, H, W)  # (B, 9, 9)
+```
+
+
+400epoch 
+
+
+
+Method2:
+  Sliding Window Correlation
+           ↓
+      Logits (9×9 scores)
+           ↓
+      ┌────┴────┐
+      ↓         ↓
+  Softmax    Gaussian Fit
+  (weighted)  (geometric)
+      ↓         ↓
+   LOSS    Monitoring Only
+      ↓
+  Backprop
+      ↓
+  Model Learns!

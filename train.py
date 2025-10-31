@@ -157,14 +157,18 @@ def _export_training_plots(history: dict, save_dir: Path) -> None:
 
     plots = [
         ("Loss", "train_loss", "val_loss", "Loss"),
-        ("RMS X (m)", "train_rms_x", "val_rms_x", "RMS X (m)"),
-        ("RMS Y (m)", "train_rms_y", "val_rms_y", "RMS Y (m)"),
+        ("RMS X (m) - Softmax", "train_softmax_rms_x", "val_softmax_rms_x", "RMS X (m)"),
+        ("RMS Y (m) - Softmax", "train_softmax_rms_y", "val_softmax_rms_y", "RMS Y (m)"),
         ("RMS Theta (rad)", "train_rms_theta", "val_rms_theta", "RMS θ (rad)"),
     ]
 
     for ax, (title, train_key, val_key, ylabel) in zip(axes, plots):
-        ax.plot(epochs, history.get(train_key, []), label="train")
-        ax.plot(epochs, history.get(val_key, []), label="val")
+        train_data = history.get(train_key, [])
+        val_data = history.get(val_key, [])
+        if train_data:  # Only plot if data exists
+            ax.plot(epochs[:len(train_data)], train_data, label="train")
+        if val_data:
+            ax.plot(epochs[:len(val_data)], val_data, label="val")
         ax.set_title(title)
         ax.set_ylabel(ylabel)
         ax.set_xlabel("Epoch")

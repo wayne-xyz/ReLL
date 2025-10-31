@@ -10,6 +10,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, random_split
 from torch.serialization import add_safe_globals
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from .config import (
     DatasetConfig,
@@ -34,10 +35,12 @@ class Trainer:
         criterion: LocalizationCriterion,
         optimizer: torch.optim.Optimizer,
         device: torch.device,
+        scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
     ):
         self.model = model.to(device)
         self.criterion = criterion.to(device)
         self.optimizer = optimizer
+        self.scheduler = scheduler
         self.device = device
 
     def _move_batch(self, batch: Dict[str, Tensor]) -> Dict[str, Tensor]:
@@ -153,8 +156,12 @@ class Trainer:
 
         stats = {
             "val_loss": total_loss / max(count, 1),
-            "val_rms_x": total_metrics["rms_x"] / max(count, 1),
-            "val_rms_y": total_metrics["rms_y"] / max(count, 1),
+            "val_pxlevel_rms_x": total_metrics["pxlevel_rms_x"] / max(count, 1),
+            "val_pxlevel_rms_y": total_metrics["pxlevel_rms_y"] / max(count, 1),
+            "val_softmax_rms_x": total_metrics["softmax_rms_x"] / max(count, 1),
+            "val_softmax_rms_y": total_metrics["softmax_rms_y"] / max(count, 1),
+            "val_gaussian_rms_x": total_metrics["gaussian_rms_x"] / max(count, 1),
+            "val_gaussian_rms_y": total_metrics["gaussian_rms_y"] / max(count, 1),
             "val_rms_theta": total_metrics["rms_theta"] / max(count, 1),
         }
         times = {
@@ -170,12 +177,20 @@ class Trainer:
 def create_history_dict() -> Dict[str, list]:
     return {
         "train_loss": [],
-        "train_rms_x": [],
-        "train_rms_y": [],
+        "train_pxlevel_rms_x": [],
+        "train_pxlevel_rms_y": [],
+        "train_softmax_rms_x": [],
+        "train_softmax_rms_y": [],
+        "train_gaussian_rms_x": [],
+        "train_gaussian_rms_y": [],
         "train_rms_theta": [],
         "val_loss": [],
-        "val_rms_x": [],
-        "val_rms_y": [],
+        "val_pxlevel_rms_x": [],
+        "val_pxlevel_rms_y": [],
+        "val_softmax_rms_x": [],
+        "val_softmax_rms_y": [],
+        "val_gaussian_rms_x": [],
+        "val_gaussian_rms_y": [],
         "val_rms_theta": [],
         "epoch_time": [],
     }
@@ -373,9 +388,23 @@ def train_localization_model(
     print("map  :", batch["map"].shape)
 
     model = LocalizationModel(model_cfg)
-    criterion = LocalizationCriterion(model_cfg)
+    criterion = LocalizationCriterion(model_cfg, downsampling_factor=model.downsampling_factor)
     optimizer = build_optimizer(model, optim_cfg)
-    trainer = Trainer(model, criterion, optimizer, device=torch.device(optim_cfg.device))
+    
+    # Dynamic learning rate scheduler: reduce LR when validation loss plateaus
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.5,
+        patience=3,
+        threshold=1e-4,
+        threshold_mode="rel",
+    )
+
+    print(f"[Model] Feature downsampling factor: {model.downsampling_factor}x (original resolution preserved)")
+    print(f"[Model] Using Gaussian peak fitting for sub-pixel refinement")
+
+    trainer = Trainer(model, criterion, optimizer, device=torch.device(optim_cfg.device), scheduler=scheduler)
 
     history = create_history_dict()
 
@@ -414,12 +443,20 @@ def train_localization_model(
         eval_time_total = time.perf_counter() - eval_start
 
         history["train_loss"].append(train_stats["loss"])
-        history["train_rms_x"].append(train_stats["rms_x"])
-        history["train_rms_y"].append(train_stats["rms_y"])
+        history["train_pxlevel_rms_x"].append(train_stats["pxlevel_rms_x"])
+        history["train_pxlevel_rms_y"].append(train_stats["pxlevel_rms_y"])
+        history["train_softmax_rms_x"].append(train_stats["softmax_rms_x"])
+        history["train_softmax_rms_y"].append(train_stats["softmax_rms_y"])
+        history["train_gaussian_rms_x"].append(train_stats["gaussian_rms_x"])
+        history["train_gaussian_rms_y"].append(train_stats["gaussian_rms_y"])
         history["train_rms_theta"].append(train_stats["rms_theta"])
         history["val_loss"].append(val_stats["val_loss"])
-        history["val_rms_x"].append(val_stats["val_rms_x"])
-        history["val_rms_y"].append(val_stats["val_rms_y"])
+        history["val_pxlevel_rms_x"].append(val_stats["val_pxlevel_rms_x"])
+        history["val_pxlevel_rms_y"].append(val_stats["val_pxlevel_rms_y"])
+        history["val_softmax_rms_x"].append(val_stats["val_softmax_rms_x"])
+        history["val_softmax_rms_y"].append(val_stats["val_softmax_rms_y"])
+        history["val_gaussian_rms_x"].append(val_stats["val_gaussian_rms_x"])
+        history["val_gaussian_rms_y"].append(val_stats["val_gaussian_rms_y"])
         history["val_rms_theta"].append(val_stats["val_rms_theta"])
 
         epoch_time = time.perf_counter() - epoch_start
@@ -467,6 +504,7 @@ def train_localization_model(
         def fmt(ms: float) -> str:
             return f"{ms * 1000:.1f} ms"
 
+        # Print training metrics showing all 3 levels with clear RMS notation
         print(
             f"Epoch {epochs_done:02d}/{total_epochs}: "
             f"train_loss={train_stats['loss']:.4f}  "
@@ -480,10 +518,14 @@ def train_localization_model(
             f"| val_rms_theta={val_stats['val_rms_theta']:.4f} deg",
         )
         print(
-            f" Epoch time={epoch_time:.2f}s  "
-            f"| remaining≈{_fmt_secs(est_remaining_secs)}  "
-            f"(ETA ~ {finish_at_dt.strftime('%Y-%m-%d %H:%M:%S')})",
+            f"         Time: {epoch_time:.2f}s | "
+            f"Remaining: {_fmt_secs(est_remaining_secs)} | "
+            f"ETA: {finish_at_dt.strftime('%H:%M:%S')}"
         )
+
+        # Update learning rate based on validation loss
+        if trainer.scheduler is not None:
+            trainer.scheduler.step(val_stats["val_loss"])
 
         if stopper.step(epochs_done, val_stats):
             print(

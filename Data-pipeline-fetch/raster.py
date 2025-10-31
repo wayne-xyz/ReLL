@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import time
 import argparse
@@ -6,6 +8,18 @@ import numpy as np
 from pathlib import Path
 import pickle  # Need pickle to save non-numpy objects like transform and profile
 import torch
+
+
+DEFAULT_SAMPLE_FOLDER = Path(
+    "G:/GithubProject/ReLL/processed_samples_austin_train/0As5GhcTExRFWNboqeHwpegdeGf2j0YW_000"
+)
+
+RAW_SAMPLE_FILES = (
+    "segment_gicp_utm.parquet",
+    "segment_utm.parquet",
+    "segment_dsm_utm.laz",
+    "segment_imagery_utm.tif",
+)
 
 
 def _fmt_seconds(sec: float) -> str:
@@ -413,6 +427,30 @@ def _voxel_thin_xy(df, voxel_xy_m: float | None):
     agg["x"] = (agg["vx"].astype(np.float32) + 0.5) * voxel_xy_m
     agg["y"] = (agg["vy"].astype(np.float32) + 0.5) * voxel_xy_m
     return agg[["x", "y", "z", "intensity"]].astype(np.float32)
+
+
+# ---------------------------------
+# Height shifting helper (0.5 pct)
+# ---------------------------------
+
+
+def _compute_shift(array: np.ndarray) -> float:
+    """Return the 0.5th percentile (ignoring NaNs)."""
+    finite = np.isfinite(array)
+    if not np.any(finite):
+        return 0.0
+    return float(np.percentile(array[finite], 0.5))
+
+
+def _shift_for_display(array: np.ndarray) -> np.ndarray:
+    """
+    Subtract the 0.5th percentile and clamp to >= 0 for nicer visualization.
+    Mirrors the logic in raster2nd.py.
+    """
+    shift = _compute_shift(array)
+    shifted = array.astype(np.float32, copy=False) - shift
+    np.maximum(shifted, 0.0, out=shifted)
+    return shifted
 
 
 def rasterize_points_to_grid(
@@ -866,143 +904,306 @@ def _resolve_point_path(path: Path) -> Path:
     return path
 
 
+def preview_sample_folder(
+    sample_dir: Path,
+    *,
+    target_m_per_px: float | None = None,
+    splat_mode: str = "none",
+    sampling: float = 1.0,
+    coarsen_factor: int | None = None,
+    voxel_xy_m: float | None = None,
+) -> None:
+    """Preview preprocessed rasters stored in a sample directory."""
+    sample_dir = Path(sample_dir)
+    if not sample_dir.exists() or not sample_dir.is_dir():
+        raise FileNotFoundError(f"Sample folder not found: {sample_dir}")
 
+    def _load_array(name: str):
+        path_local = sample_dir / name
+        if not path_local.exists():
+            print(f"[missing] {name}")
+            return None
+        try:
+            arr_local = np.load(path_local)
+        except Exception as exc:  # pragma: no cover - diagnostics only
+            print(f"[error] Failed to load {name}: {exc}")
+            return None
+        print(f"[loaded] {name} -> shape={arr_local.shape}, dtype={arr_local.dtype}")
+        return arr_local
 
-    def preview_sample_folder(
-        sample_dir: Path,
-        *,
-        target_m_per_px: float = 0.1,
-        splat_mode: str = "none",
-        sampling: float = 1.0,
-        coarsen_factor: int | None = None,
-        voxel_xy_m: float | None = None,
-    ):
-        """Preview preprocessed rasters stored in a sample directory."""
-        sample_dir = Path(sample_dir)
-        if not sample_dir.exists() or not sample_dir.is_dir():
-            raise FileNotFoundError(f"Sample folder not found: {sample_dir}")
+    dsm_height = _load_array("dsm_height.npy")
+    gicp_height = _load_array("gicp_height.npy")
+    gicp_intensity = _load_array("gicp_intensity.npy")
+    imagery = _load_array("imagery.npy")
+    non_height = _load_array("non_aligned_height.npy")
+    non_intensity = _load_array("non_aligned_intensity.npy")
 
-        def _load_array(name: str):
-            path_local = sample_dir / name
-            if not path_local.exists():
-                print(f"[missing] {name}")
-                return None
+    arrays = [
+        ("DSM Height", dsm_height, "viridis"),
+        ("GICP Height", gicp_height, "viridis"),
+        ("GICP Intensity", gicp_intensity, "gray"),
+        ("Imagery (RGB)", imagery, None),
+        ("Non-aligned Height", non_height, "viridis"),
+        ("Non-aligned Intensity", non_intensity, "gray"),
+    ]
+
+    transform = None
+    resolution = None
+    print("\n" + "=" * 80)
+    print(f"Sample: {sample_dir}")
+    print("=" * 80)
+    for name in ["resolution.pkl", "transform.pkl", "profile.pkl", "metadata.pkl"]:
+        path_local = sample_dir / name
+        if not path_local.exists():
+            print(f"{name}: <missing>")
+            continue
+        try:
+            with open(path_local, "rb") as fh:
+                data = pickle.load(fh)
+        except Exception as exc:  # pragma: no cover - diagnostics only
+            print(f"{name}: <error reading pickle> ({exc})")
+            continue
+        print(f"{name}: {data}")
+        if name == "resolution.pkl":
             try:
-                arr_local = np.load(path_local)
-            except Exception as exc:  # pragma: no cover - diagnostics only
-                print(f"[error] Failed to load {name}: {exc}")
-                return None
-            print(f"[loaded] {name} -> shape={arr_local.shape}, dtype={arr_local.dtype}")
-            return arr_local
+                resolution = float(data)
+            except Exception:
+                resolution = None
+        if name == "transform.pkl":
+            transform = data
 
-        dsm_height = _load_array("dsm_height.npy")
-        gicp_height = _load_array("gicp_height.npy")
-        gicp_intensity = _load_array("gicp_intensity.npy")
-        imagery = _load_array("imagery.npy")
-        non_height = _load_array("non_aligned_height.npy")
-        non_intensity = _load_array("non_aligned_intensity.npy")
+    extent = None
+    grid_shape = None
+    for _, arr, _ in arrays:
+        if arr is None:
+            continue
+        if arr.ndim == 3:
+            grid_shape = (arr.shape[1], arr.shape[2])
+        elif arr.ndim == 2:
+            grid_shape = arr.shape
+        if grid_shape is not None:
+            break
+    if transform is not None and grid_shape is not None:
+        extent = _extent_from_transform(transform, grid_shape[1], grid_shape[0])
 
-        arrays = [
-            ("DSM Height", dsm_height, "terrain"),
-            ("GICP Height", gicp_height, "viridis"),
-            ("GICP Intensity", gicp_intensity, "gray"),
-            ("Imagery (RGB)", imagery, None),
-            ("Non-aligned Height", non_height, "magma"),
-            ("Non-aligned Intensity", non_intensity, "gray"),
-        ]
-
-        transform = None
-        resolution = None
-        print("\n" + "=" * 80)
-        print(f"Sample: {sample_dir}")
-        print("=" * 80)
-        for name in ["resolution.pkl", "transform.pkl", "profile.pkl", "metadata.pkl"]:
-            path_local = sample_dir / name
-            if not path_local.exists():
-                print(f"{name}: <missing>")
-                continue
-            try:
-                with open(path_local, "rb") as fh:
-                    data = pickle.load(fh)
-            except Exception as exc:  # pragma: no cover - diagnostics only
-                print(f"{name}: <error reading pickle> ({exc})")
-                continue
-            print(f"{name}: {data}")
-            if name == "resolution.pkl":
-                try:
-                    resolution = float(data)
-                except Exception:
-                    resolution = None
-            if name == "transform.pkl":
-                transform = data
-
-        extent = None
-        grid_shape = None
-        for _, arr, _ in arrays:
-            if arr is None:
-                continue
-            if arr.ndim == 3:
-                grid_shape = (arr.shape[1], arr.shape[2])
-            elif arr.ndim == 2:
-                grid_shape = arr.shape
-            if grid_shape is not None:
-                break
-        if transform is not None and grid_shape is not None:
-            extent = _extent_from_transform(transform, grid_shape[1], grid_shape[0])
-
-        print("\nArray statistics:")
-        for title, arr, _ in arrays:
-            if arr is None:
-                continue
-            info = f"shape={arr.shape}, dtype={arr.dtype}"
-            if arr.ndim == 2:
-                finite = np.isfinite(arr)
-                if np.any(finite):
-                    vmin = float(np.nanmin(arr[finite]))
-                    vmax = float(np.nanmax(arr[finite]))
-                    mean = float(np.nanmean(arr[finite]))
-                else:
-                    vmin = vmax = mean = float('nan')
-                info += f", min={vmin:.3f}, max={vmax:.3f}, mean={mean:.3f}"
-            print(f"  {title:<24} {info}")
-
-        fig, axes = plt.subplots(2, 3, figsize=(18, 12), constrained_layout=True)
-        axes = axes.flatten()
-
-        for ax, (title, arr, cmap) in zip(axes, arrays):
-            ax.set_title(title)
-            ax.set_axis_off()
-            if arr is None:
-                ax.text(0.5, 0.5, "Missing", ha="center", va="center", transform=ax.transAxes)
-                continue
-            if arr.ndim == 3:
-                chw = arr
-                if chw.shape[0] >= 3:
-                    rgb = np.transpose(chw[:3, :, :], (1, 2, 0))
-                else:
-                    rgb = np.transpose(np.repeat(chw[0:1, :, :], 3, axis=0), (1, 2, 0))
-                rgb = np.clip(rgb, 0.0, 1.0)
-                ax.imshow(rgb, extent=extent, origin="upper")
+    print("\nArray statistics:")
+    for title, arr, _ in arrays:
+        if arr is None:
+            continue
+        info = f"shape={arr.shape}, dtype={arr.dtype}"
+        if arr.ndim == 2:
+            finite = np.isfinite(arr)
+            if np.any(finite):
+                vmin = float(np.nanmin(arr[finite]))
+                vmax = float(np.nanmax(arr[finite]))
+                mean = float(np.nanmean(arr[finite]))
             else:
-                finite = np.isfinite(arr)
+                vmin = vmax = mean = float("nan")
+            info += f", min={vmin:.3f}, max={vmax:.3f}, mean={mean:.3f}"
+        print(f"  {title:<24} {info}")
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12), constrained_layout=True)
+    axes = axes.flatten()
+
+    for ax, (title, arr, cmap) in zip(axes, arrays):
+        ax.set_title(title)
+        ax.set_axis_off()
+        if arr is None:
+            ax.text(0.5, 0.5, "Missing", ha="center", va="center", transform=ax.transAxes)
+            continue
+        if arr.ndim == 3:
+            chw = arr
+            if chw.shape[0] >= 3:
+                rgb = np.transpose(chw[:3, :, :], (1, 2, 0))
+            else:
+                rgb = np.transpose(np.repeat(chw[0:1, :, :], 3, axis=0), (1, 2, 0))
+            rgb = np.clip(rgb, 0.0, 1.0)
+            ax.imshow(rgb, extent=extent, origin="upper")
+        else:
+            finite = np.isfinite(arr)
+            if np.any(finite):
+                vmin = float(np.nanpercentile(arr[finite], 1))
+                vmax = float(np.nanpercentile(arr[finite], 99))
+                if np.isclose(vmin, vmax):
+                    vmax = vmin + 1e-6
+            else:
+                vmin, vmax = 0.0, 1.0
+            im = ax.imshow(arr, cmap=cmap or "viridis", extent=extent, origin="upper", vmin=vmin, vmax=vmax)
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+
+    for ax in axes[len(arrays) :]:
+        ax.set_axis_off()
+
+    suptitle = f"Raster Preview: {sample_dir.name}"
+    if resolution is not None:
+        suptitle += f" | resolution ≈ {resolution:.3f} m/px"
+    plt.suptitle(suptitle)
+    plt.show()
+
+
+def _describe_array(name: str, array: np.ndarray | None) -> None:
+    """Print shape and value range stats for an array."""
+    if array is None:
+        print(f"{name:<24} missing")
+        return
+    if array.ndim == 3 and name.lower() != "imagery":
+        # treat as multi-channel but report global stats
+        flat = array
+    else:
+        flat = array
+    finite = np.isfinite(flat)
+    shape = array.shape
+    if not np.any(finite):
+        print(f"{name:<24} shape={shape}, no finite values")
+        return
+    vmin = float(np.nanmin(flat[finite]))
+    vmax = float(np.nanmax(flat[finite]))
+    mean = float(np.nanmean(flat[finite]))
+    print(f"{name:<24} shape={shape}, min={vmin:.3f}, max={vmax:.3f}, mean={mean:.3f}")
+
+
+def preview_raw_sample(
+    sample_dir: Path,
+    *,
+    target_m_per_px: float | None = None,
+    splat_mode: str = "none",
+    splat_radius_px: int = 1,
+    splat_sigma_px: float = 0.9,
+    sampling: float = 1.0,
+    voxel_xy_m: float | None = None,
+) -> None:
+    """
+    Build rasters on-the-fly from a raw sample directory (Parquet/LAZ/TIF) and
+    preview 9 panels (GICP x3, Non-aligned x3, DSM x2, Imagery).
+    """
+    sample_dir = Path(sample_dir)
+    if not sample_dir.exists():
+        raise FileNotFoundError(f"Sample folder not found: {sample_dir}")
+
+    gicp_path = sample_dir / "segment_gicp_utm.parquet"
+    non_path = sample_dir / "segment_utm.parquet"
+    dsm_path = sample_dir / "segment_dsm_utm.laz"
+    imagery_path = sample_dir / "segment_imagery_utm.tif"
+    for path in (gicp_path, non_path, dsm_path, imagery_path):
+        if not path.exists():
+            raise FileNotFoundError(f"Expected file missing for raw preview: {path}")
+
+    rasters = build_training_rasters(
+        gicp_parquet=gicp_path,
+        non_aligned_parquet=non_path,
+        dsm_points_path=dsm_path,
+        imagery_path=imagery_path,
+        target_m_per_px=target_m_per_px,
+        sampling=sampling,
+        splat_mode=splat_mode,
+        splat_radius_px=splat_radius_px,
+        splat_sigma_px=splat_sigma_px,
+        voxel_xy_m=voxel_xy_m,
+        preview=False,
+    )
+
+    gicp_height = _shift_for_display(rasters["gicp_height"])
+    non_height = _shift_for_display(rasters["non_aligned_height"])
+    dsm_height = _shift_for_display(rasters["dsm_height"])
+
+    panels = [
+        ("GICP Height (shifted)", gicp_height, "viridis"),
+        ("GICP Intensity", rasters["gicp_intensity"], "gray"),
+        ("GICP Density", rasters["gicp_density"], "magma"),
+        ("Non-aligned Height (shifted)", non_height, "viridis"),
+        ("Non-aligned Intensity", rasters["non_aligned_intensity"], "gray"),
+        ("Non-aligned Density", rasters["non_aligned_density"], "magma"),
+        ("DSM Height (shifted)", dsm_height, "viridis"),
+        ("DSM Density", rasters["dsm_density"], "magma"),
+        ("Imagery", rasters["imagery"], None),
+    ]
+
+    print("\n" + "=" * 80)
+    print(f"Raw sample preview: {sample_dir}")
+    print("=" * 80)
+    for title, arr, _ in panels:
+        if title == "Imagery" and arr is not None:
+            print(f"{title:<24} shape={arr.shape}")
+            channels = arr.shape[0]
+            for c in range(min(3, channels)):
+                channel = arr[c]
+                finite = np.isfinite(channel)
                 if np.any(finite):
-                    vmin = float(np.nanpercentile(arr[finite], 1))
-                    vmax = float(np.nanpercentile(arr[finite], 99))
-                    if np.isclose(vmin, vmax):
-                        vmax = vmin + 1e-6
+                    vmin = float(np.nanmin(channel[finite]))
+                    vmax = float(np.nanmax(channel[finite]))
+                    mean = float(np.nanmean(channel[finite]))
                 else:
-                    vmin, vmax = 0.0, 1.0
-                im = ax.imshow(arr, cmap=cmap or "viridis", extent=extent, origin="upper", vmin=vmin, vmax=vmax)
-                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+                    vmin = vmax = mean = float("nan")
+                print(
+                    f"{title} channel {c}: shape={channel.shape}, min={vmin:.3f}, "
+                    f"max={vmax:.3f}, mean={mean:.3f}"
+                )
+        else:
+            _describe_array(title, arr)
 
-        for ax in axes[len(arrays):]:
-            ax.set_axis_off()
+    fig, axes = plt.subplots(3, 3, figsize=(18, 14), constrained_layout=True)
+    axes = axes.reshape(3, 3)
 
-        suptitle = f"Raster Preview: {sample_dir.name}"
-        if resolution is not None:
-            suptitle += f" | resolution ≈ {resolution:.3f} m/px"
-        plt.suptitle(suptitle)
-        plt.show()
+    for ax, (title, arr, cmap) in zip(axes.flat, panels):
+        ax.set_title(title)
+        ax.set_axis_off()
+        if arr is None:
+            ax.text(0.5, 0.5, "Missing", ha="center", va="center", transform=ax.transAxes)
+            continue
+        if title == "Imagery":
+            chw = arr
+            if chw.shape[0] >= 3:
+                rgb = np.transpose(chw[:3, :, :], (1, 2, 0))
+            else:
+                rgb = np.transpose(np.repeat(chw[0:1, :, :], 3, axis=0), (1, 2, 0))
+            rgb_min = np.nanpercentile(rgb, 1)
+            rgb_max = np.nanpercentile(rgb, 99)
+            rgb = np.clip((rgb - rgb_min) / (rgb_max - rgb_min + 1e-6), 0.0, 1.0)
+            ax.imshow(rgb, origin="upper")
+        else:
+            finite = np.isfinite(arr)
+            if np.any(finite):
+                vmin = float(np.nanpercentile(arr[finite], 1))
+                vmax = float(np.nanpercentile(arr[finite], 99))
+                if np.isclose(vmin, vmax):
+                    vmax = vmin + 1e-6
+            else:
+                vmin, vmax = 0.0, 1.0
+            im = ax.imshow(arr, cmap=cmap or "viridis", origin="upper", vmin=vmin, vmax=vmax)
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+
+    if target_m_per_px is not None:
+        subtitle = f"~{target_m_per_px:.3f} m/px"
+    else:
+        subtitle = "native resolution"
+    fig.suptitle(
+        f"Raw sample raster preview @ {subtitle} | {sample_dir.name}", fontsize=16
+    )
+    plt.show()
+
+def _normalize_sample_folder(path_str: str | None) -> Path | None:
+    """
+    Resolve a sample-folder string to an existing Path, with a fallback for
+    Windows-style drive paths when running under POSIX (e.g., WSL).
+    """
+    if path_str is None:
+        return None
+    cleaned = path_str.strip()
+    if not cleaned:
+        return None
+    candidate = Path(cleaned).expanduser()
+    if candidate.exists():
+        return candidate
+
+    # Try Windows drive → /mnt/<drive> translation when running on POSIX
+    if len(cleaned) > 2 and cleaned[1] == ":":
+        drive = cleaned[0].lower()
+        remainder = cleaned[2:].replace("\\", "/").lstrip("/\\")
+        linux_candidate = Path(f"/mnt/{drive}/{remainder}")
+        if linux_candidate.exists():
+            return linux_candidate
+    return candidate
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -1059,33 +1260,69 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sample-folder",
         type=str,
-        default=None,
-        help="Path to a sample folder (e.g., Rell-sample-raster/<sample>). If provided, previews rasters from that folder at the requested target resolution.",
+        default=str(DEFAULT_SAMPLE_FOLDER),
+        help=(
+            "Path to a sample folder (e.g., Rell-sample-raster/<sample>). "
+            "Defaults to the Austin sample used for training previews."
+        ),
     )
     parser.add_argument(
         "--preview-target-m-per-px",
         type=float,
-        default=0.1,
-        help="Target meters-per-pixel for previewing imagery and rasters (default 0.1).",
+        default=None,
+        help="Optional target meters-per-pixel for previewing rasters. Omit to use native resolution.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    # If --sample-folder provided, preview rasters from that sample at the requested resolution
-    if getattr(args, "sample_folder", None):
-        sample_path = Path(args.sample_folder)
-        print(f"Previewing sample folder: {sample_path} at {args.preview_target_m_per_px} m/px")
-        preview_sample_folder(
-            sample_path,
-            target_m_per_px=args.preview_target_m_per_px,
-            splat_mode=args.splat_mode,
-            sampling=args.sampling,
-            coarsen_factor=None,
-            voxel_xy_m=args.voxel_xy_m,
+    # Resolve sample folder (default points to Austin training sample)
+    sample_folder = _normalize_sample_folder(getattr(args, "sample_folder", None))
+    target_desc = (
+        f"{args.preview_target_m_per_px} m/px"
+        if args.preview_target_m_per_px is not None
+        else "native resolution"
+    )
+    if sample_folder:
+        is_raw_sample = all((sample_folder / name).exists() for name in RAW_SAMPLE_FILES)
+        if is_raw_sample:
+            print(
+                f"Previewing RAW sample folder: {sample_folder} at "
+                f"{target_desc}"
+            )
+            preview_raw_sample(
+                sample_folder,
+                target_m_per_px=args.preview_target_m_per_px,
+                splat_mode=args.splat_mode,
+                splat_radius_px=args.splat_radius,
+                splat_sigma_px=args.splat_sigma,
+                sampling=args.sampling,
+                voxel_xy_m=args.voxel_xy_m,
+            )
+            return
+        processed_signals = any(
+            (sample_folder / candidate).exists()
+            for candidate in ("gicp_height.npy", "imagery.npy", "dsm_height.npy")
         )
-        return
+        if processed_signals:
+            print(
+                f"Previewing processed rasters in folder: {sample_folder} at "
+                f"{target_desc}"
+            )
+            preview_sample_folder(
+                sample_folder,
+                target_m_per_px=args.preview_target_m_per_px,
+                splat_mode=args.splat_mode,
+                sampling=args.sampling,
+                coarsen_factor=None,
+                voxel_xy_m=args.voxel_xy_m,
+            )
+            return
+        print(
+            f"Provided sample folder {sample_folder} does not look like a raw or processed sample "
+            "directory. Falling back to single-point preview mode."
+        )
 
     # Fallback: original single-point preview mode
     point_path = _resolve_point_path(Path(args.data))
