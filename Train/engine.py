@@ -47,6 +47,7 @@ class Trainer:
         self.model.train()
         total_loss = 0.0
         total_metrics = {"rms_x": 0.0, "rms_y": 0.0, "rms_theta": 0.0}
+        total_metrics = {"rms_x": 0.0, "rms_y": 0.0, "rms_theta": 0.0}
         count = 0
 
         t_fetch = t_to_dev = t_forward = t_loss = t_backward = t_step = 0.0
@@ -114,6 +115,7 @@ class Trainer:
     def evaluate(self, loader: DataLoader) -> Tuple[Dict[str, float], Dict[str, float]]:
         self.model.eval()
         total_loss = 0.0
+        total_metrics = {"rms_x": 0.0, "rms_y": 0.0, "rms_theta": 0.0}
         total_metrics = {"rms_x": 0.0, "rms_y": 0.0, "rms_theta": 0.0}
         count = 0
 
@@ -470,6 +472,7 @@ def train_localization_model(
             f"train_loss={train_stats['loss']:.4f}  "
             f"| train_rms_x={train_stats['rms_x']:.3f} m  "
             f"| train_rms_y={train_stats['rms_y']:.3f} m  "
+            f"| train_rms_theta={train_stats['rms_theta']:.4f} deg  ||  "
             f"| train_rms_theta={train_stats['rms_theta']:.4f} deg  ||  "
             f"val_loss={val_stats['val_loss']:.4f}  "
             f"| val_rms_x={val_stats['val_rms_x']:.3f} m  "
