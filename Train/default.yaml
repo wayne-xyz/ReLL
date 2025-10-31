@@ -21,6 +21,8 @@ model:
   w_xy: 1.0
   w_theta: 1.0
   gaussian_sigma_theta_deg: 1.0
+  sigma_weight_xy: 1.0
+  sigma_weight_theta: 1.0
 
 optim:
   lr: 0.0005

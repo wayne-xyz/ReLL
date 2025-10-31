@@ -331,8 +331,8 @@ def train_localization_model(
     model_cfg: ModelConfig,
     optim_cfg: OptimConfig,
     random_seed: int = 42,
-    save_cfg: Optional[SaveConfig] = SaveConfig(),
-    early_stop_cfg: Optional[EarlyStopConfig] = EarlyStopConfig(),
+    save_cfg: Optional[SaveConfig] = None,
+    early_stop_cfg: Optional[EarlyStopConfig] = None,
     subset_fraction: float = 1.0,
 ):
     root = Path(processed_raster_data_dir)
@@ -353,8 +353,11 @@ def train_localization_model(
         sample_dirs = sample_dirs[:subset_count]
         print(f"[Subset] Using {subset_count}/{original_count} samples (~{subset_fraction * 100:.1f}%).")
 
-    dataset_cfg.sample_root = sample_dirs
+    dataset_cfg.sample_root = tuple(sample_dirs)
     dataset_cfg.raster_builder = raster_builder_from_processed_dir
+
+    if save_cfg is None:
+        raise ValueError("save_cfg must be provided; load_default_configs returns a populated instance.")
 
     full_dataset = GeoAlignRasterDataset(dataset_cfg)
     n_total = len(full_dataset)

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import os
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import torch
 
-from Train.config import DEFAULT_DATA_ROOT, load_default_configs
+from Train.config import DEFAULT_CONFIG_PATH, DEFAULT_DATA_ROOT, load_default_configs
 from Train.engine import train_localization_model
 
 
@@ -80,42 +81,49 @@ def _detect_device(cli_device: str | None) -> str:
 
 def main() -> None:
     args = parse_args()
-    default_config_path = Path(__file__).parent / "Train" / "default.yaml"
+    cli_overrides: Dict[str, Dict[str, Any]] = {}
+
+    def _set_override(section: str, key: str, value: Any) -> None:
+        if value is None:
+            return
+        cli_overrides.setdefault(section, {})[key] = value
+
+    _set_override("model", "embed_dim", args.embed_dim)
+    _set_override("model", "proj_dim", args.proj_dim)
+    _set_override("model", "encoder_depth", args.encoder_depth)
+    _set_override("model", "stem_channels", args.stem_channels)
+    _set_override("model", "search_radius", args.search_radius)
+    if args.max_rotation_deg is not None:
+        _set_override("dataset", "max_rotation_deg", float(args.max_rotation_deg))
+    _set_override("optim", "batch_size", args.batch_size)
+    _set_override("optim", "epochs", args.epochs)
+    _set_override("optim", "lr", args.lr)
+    _set_override("optim", "weight_decay", args.weight_decay)
+
+    default_config_path = DEFAULT_CONFIG_PATH
     config_path = args.config or (default_config_path if default_config_path.exists() else None)
 
     dataset_cfg, model_cfg, optim_cfg, save_cfg, early_cfg = load_default_configs(
         save_dir=args.save_dir,
         config_path=config_path,
+        overrides=cli_overrides or None,
     )
 
     if config_path is not None:
         print(f"[Config] Loaded overrides from: {Path(config_path).resolve()}")
 
-    if args.embed_dim is not None:
-        model_cfg.embed_dim = args.embed_dim
-    if args.proj_dim is not None:
-        model_cfg.proj_dim = args.proj_dim
-    if args.encoder_depth is not None:
-        model_cfg.encoder_depth = args.encoder_depth
-    if args.stem_channels is not None:
-        model_cfg.stem_channels = args.stem_channels
-    if args.search_radius is not None:
-        model_cfg.search_radius = args.search_radius
-
     dataset_cfg.max_translation_px = model_cfg.search_radius
-    if args.max_rotation_deg is not None:
-        dataset_cfg.max_rotation_deg = float(args.max_rotation_deg)
     model_cfg.theta_search_deg = max(int(round(dataset_cfg.max_rotation_deg)), 0)
 
-    optim_cfg.device = _detect_device(args.device)
-    if args.batch_size is not None:
-        optim_cfg.batch_size = args.batch_size
-    if args.epochs is not None:
-        optim_cfg.epochs = args.epochs
-    if args.lr is not None:
-        optim_cfg.lr = args.lr
-    if args.weight_decay is not None:
-        optim_cfg.weight_decay = args.weight_decay
+    requested_device: Optional[str]
+    if args.device == "auto":
+        requested_device = None
+    elif args.device is not None:
+        requested_device = args.device
+    else:
+        yaml_device = getattr(optim_cfg, "device", None)
+        requested_device = None if yaml_device in (None, "auto") else yaml_device
+    optim_cfg.device = _detect_device(requested_device)
 
     save_cfg.monitor = "val_loss"
     save_cfg.mode = "min"
@@ -124,7 +132,7 @@ def main() -> None:
 
     print(f"[Device] Training on: {optim_cfg.device}")
 
-    data_root = args.data_root or DEFAULT_DATA_ROOT
+    data_root = args.data_root or (dataset_cfg.sample_root[0] if dataset_cfg.sample_root else DEFAULT_DATA_ROOT)
     _, _, _, _, history = train_localization_model(
         processed_raster_data_dir=data_root,
         dataset_cfg=dataset_cfg,
