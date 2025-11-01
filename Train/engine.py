@@ -528,18 +528,18 @@ def train_localization_model(
             f"| val_rms_theta={_fmt_stat(val_stats, 'val_rms_theta', '.4f')} deg"
         )
         print(
-            "         Pixel RMS (m):   "
+            "         Pixel RMS (m):      "
             f"train=({_fmt_stat(train_stats, 'pxlevel_rms_x')} x, {_fmt_stat(train_stats, 'pxlevel_rms_y')} y)  "
             f"| val=({_fmt_stat(val_stats, 'val_pxlevel_rms_x')} x, {_fmt_stat(val_stats, 'val_pxlevel_rms_y')} y)"
         )
         print(
-            "         Softmax RMS (m): "
+            "         Softmax RMS (m):    "
             f"train=({_fmt_stat(train_stats, 'softmax_rms_x')} x, {_fmt_stat(train_stats, 'softmax_rms_y')} y)  "
             f"| val=({_fmt_stat(val_stats, 'val_softmax_rms_x')} x, {_fmt_stat(val_stats, 'val_softmax_rms_y')} y)"
         )
         print(
-            "         Gaussian RMS (m):"
-            f" train=({_fmt_stat(train_stats, 'gaussian_rms_x')} x, {_fmt_stat(train_stats, 'gaussian_rms_y')} y)  "
+            "         Gaussian RMS (m):   "
+            f"train=({_fmt_stat(train_stats, 'gaussian_rms_x')} x, {_fmt_stat(train_stats, 'gaussian_rms_y')} y)  "
             f"| val=({_fmt_stat(val_stats, 'val_gaussian_rms_x')} x, {_fmt_stat(val_stats, 'val_gaussian_rms_y')} y)"
         )
         print(
@@ -576,21 +576,21 @@ def train_localization_model(
             f"val_loss={_fmt_stat(best_epoch_stats, 'val_loss', '.4f')}"
         )
         print(
-            "       Theta RMS (deg):   "
+            "       Theta RMS (deg):     "
             f"train={_fmt_stat(best_epoch_stats, 'rms_theta', '.4f')}  "
             f"| val={_fmt_stat(best_epoch_stats, 'val_rms_theta', '.4f')}"
         )
         print(
-            "       Pixel RMS (m):   "
+            "       Pixel RMS (m):      "
             f"{_fmt_stat(best_epoch_stats, 'val_pxlevel_rms_x')} x, {_fmt_stat(best_epoch_stats, 'val_pxlevel_rms_y')} y"
         )
         print(
-            "       Softmax RMS (m): "
+            "       Softmax RMS (m):    "
             f"{_fmt_stat(best_epoch_stats, 'val_softmax_rms_x')} x, {_fmt_stat(best_epoch_stats, 'val_softmax_rms_y')} y"
         )
         print(
-            "       Gaussian RMS (m):"
-            f" {_fmt_stat(best_epoch_stats, 'val_gaussian_rms_x')} x, {_fmt_stat(best_epoch_stats, 'val_gaussian_rms_y')} y"
+            "       Gaussian RMS (m):   "
+            f"{_fmt_stat(best_epoch_stats, 'val_gaussian_rms_x')} x, {_fmt_stat(best_epoch_stats, 'val_gaussian_rms_y')} y"
         )
     return model, criterion, optimizer, trainer, history
 

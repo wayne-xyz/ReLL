@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .config import ModelConfig
+from .gaussian_peak_refine import gaussian_peak_refine
 
 
 class PyramidEncoder(nn.Module):
@@ -182,105 +183,48 @@ class LocalizationCriterion(nn.Module):
         # Store downsampling factor (feature space is downsampled by this factor)
         self.downsampling_factor = downsampling_factor
 
-    def _gaussian_peak_fit_2d(self, logits: Tensor) -> Tuple[Tensor, Tensor]:
+    def _gaussian_peak_refine(self, logits: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         """
-        Fit 2D Gaussian to correlation peak for sub-pixel refinement.
+        Apply advanced Gaussian peak refinement using the sophisticated method from gaussian_peak_refine.py.
 
-        Method: Log-domain parabolic fitting
-        For a Gaussian peak: f(x,y) = A*exp(-((x-μx)²+(y-μy)²)/2σ²)
-        In log-space: ln(f) = ln(A) - (x-μx)²/2σ² - (y-μy)²/2σ²
-        This is a paraboloid, and we can find the peak analytically.
+        This method combines multiple refinement strategies:
+        - Weighted centroid baseline
+        - One-dimensional quadratic refinement
+        - Newton-Raphson iterative optimization
+        - Softmax expectation
+        - 2D quadratic fitting
+        - Blending with adaptive penalties
 
         Args:
             logits: (B, H, W) correlation scores from sliding window
 
         Returns:
-            mu_x_px: (B,) refined x position in pixels (can be fractional)
-            mu_y_px: (B,) refined y position in pixels (can be fractional)
+            mu_x_px: (B,) refined x position in pixels
+            mu_y_px: (B,) refined y position in pixels
+            scores: (B,) refined peak scores
         """
         B, H, W = logits.shape
         device = logits.device
 
-        # Find discrete maximum (pixel-level)
-        flat_logits = logits.view(B, -1)
-        argmax_indices = torch.argmax(flat_logits, dim=-1)  # (B,)
-        argmax_row = argmax_indices // W  # y index
-        argmax_col = argmax_indices % W   # x index
-
-        # Extract 3x3 neighborhood around peak for each sample in batch
-        # Handle edge cases by clamping
         mu_x_refined = []
         mu_y_refined = []
+        scores_refined = []
 
         for b in range(B):
-            row = argmax_row[b].item()
-            col = argmax_col[b].item()
+            heatmap = logits[b]  # (H, W)
 
-            # Get 3x3 window, handling boundaries
-            row_start = max(0, row - 1)
-            row_end = min(H, row + 2)
-            col_start = max(0, col - 1)
-            col_end = min(W, col + 2)
+            # Apply the advanced Gaussian peak refinement
+            result = gaussian_peak_refine(heatmap)
 
-            # Extract neighborhood
-            neighborhood = logits[b, row_start:row_end, col_start:col_end]
-
-            # If we're at an edge, we might have < 3x3, skip refinement
-            if neighborhood.shape[0] < 3 or neighborhood.shape[1] < 3:
-                # Use discrete peak position
-                mu_x_refined.append(float(col - W // 2))
-                mu_y_refined.append(float(row - H // 2))
-                continue
-
-            # Apply log (add small epsilon to avoid log(0))
-            log_neighborhood = torch.log(neighborhood.clamp(min=1e-10))
-
-            # Get center and neighbors
-            # log_neighborhood is now 3x3
-            if log_neighborhood.shape == (3, 3):
-                c_00 = log_neighborhood[1, 1]  # center
-                c_m10 = log_neighborhood[1, 0]  # left
-                c_p10 = log_neighborhood[1, 2]  # right
-                c_0m1 = log_neighborhood[0, 1]  # top
-                c_0p1 = log_neighborhood[2, 1]  # bottom
-
-                # Compute second derivatives (curvature)
-                d2_dx2 = c_m10 - 2 * c_00 + c_p10
-                d2_dy2 = c_0m1 - 2 * c_00 + c_0p1
-
-                # Compute first derivatives (gradient)
-                d_dx = (c_p10 - c_m10) / 2.0
-                d_dy = (c_0p1 - c_0m1) / 2.0
-
-                # Sub-pixel offset from discrete peak
-                # delta = -gradient / curvature (Newton's method)
-                dx = torch.tensor(0.0, device=device, dtype=log_neighborhood.dtype)
-                dy = torch.tensor(0.0, device=device, dtype=log_neighborhood.dtype)
-                if d2_dx2 < -1e-6:  # Check for negative curvature (maximum)
-                    dx = -d_dx / d2_dx2
-                if d2_dy2 < -1e-6:
-                    dy = -d_dy / d2_dy2
-
-                # Clamp to reasonable range (±1 pixel) and convert to float
-                dx = float(dx.clamp(-1.0, 1.0))
-                dy = float(dy.clamp(-1.0, 1.0))
-
-                # Refined position = discrete position + sub-pixel offset
-                # Convert to coordinate system: center of search window is (0, 0)
-                refined_x = (col - W // 2) + dx
-                refined_y = (row - H // 2) + dy
-            else:
-                # Fallback to discrete
-                refined_x = float(col - W // 2)
-                refined_y = float(row - H // 2)
-
-            mu_x_refined.append(refined_x)
-            mu_y_refined.append(refined_y)
+            mu_x_refined.append(result.x)
+            mu_y_refined.append(result.y)
+            scores_refined.append(result.score)
 
         mu_x_px = torch.tensor(mu_x_refined, device=device, dtype=logits.dtype)
         mu_y_px = torch.tensor(mu_y_refined, device=device, dtype=logits.dtype)
+        scores = torch.tensor(scores_refined, device=device, dtype=logits.dtype)
 
-        return mu_x_px, mu_y_px
+        return mu_x_px, mu_y_px, scores
 
     def forward(self, predictions: Dict[str, Tensor], batch: Dict[str, Tensor]) -> Tuple[Tensor, Dict[str, Tensor]]:
         logits = predictions["translation_logits"]
@@ -313,9 +257,10 @@ class LocalizationCriterion(nn.Module):
         pxlevel_rms_x = torch.sqrt(torch.mean(pxlevel_err_x ** 2) + 1e-9)
         pxlevel_rms_y = torch.sqrt(torch.mean(pxlevel_err_y ** 2) + 1e-9)
 
-        # ===== Level 2: Gaussian peak fitting (for MONITORING only - not differentiable!) =====
+        # ===== Level 2: Advanced Gaussian peak fitting (for MONITORING only - not differentiable!) =====
         with torch.no_grad():  # Gaussian fitting doesn't preserve gradients
-            gaussian_x_px, gaussian_y_px = self._gaussian_peak_fit_2d(logits)
+            # Advanced Gaussian refinement (multi-strategy blended approach from gaussian_peak_refine.py)
+            gaussian_x_px, gaussian_y_px, gaussian_scores = self._gaussian_peak_refine(logits)
             gaussian_x_m = gaussian_x_px * resolution
             gaussian_y_m = gaussian_y_px * resolution
 
@@ -387,13 +332,13 @@ class LocalizationCriterion(nn.Module):
         # Three levels for comparison:
         # 1. Pixel-level: Discrete argmax from sliding window
         # 2. Softmax: Differentiable sub-pixel (USED IN LOSS - model learns this)
-        # 3. Gaussian: Non-differentiable geometric refinement (monitoring only)
+        # 3. Gaussian: Advanced multi-strategy blended refinement (monitoring only)
         metrics = {
             "pxlevel_rms_x": pxlevel_rms_x,        # Level 1: Discrete
             "pxlevel_rms_y": pxlevel_rms_y,
             "softmax_rms_x": softmax_rms_x,        # Level 2: Softmax (LOSS target)
             "softmax_rms_y": softmax_rms_y,
-            "gaussian_rms_x": gaussian_rms_x,      # Level 3: Gaussian (monitoring)
+            "gaussian_rms_x": gaussian_rms_x,      # Level 3: Advanced Gaussian (monitoring)
             "gaussian_rms_y": gaussian_rms_y,
             "rms_theta": rms_theta,
             "sigma_err_x": sigma_err_x,
