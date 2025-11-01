@@ -128,3 +128,51 @@ Norm	Best epoch	val_loss (best)	val_xy (m)	val_th (rad)
 BN	27	2.1953	1.0840	0.0274
 IN	19	2.0109	0.9900	0.0315
 GN	29	2.3933	1.1880	0.0173
+
+
+Method:
+ Softmax (Convert to Probabilities)
+```python
+flat_logits = logits.view(B, -1)  # Flatten: (B, 9×9) = (B, 81)
+prob = F.softmax(flat_logits, dim=-1).view(B, H, W)  # (B, 9, 9)
+```
+
+
+400epoch 
+
+
+
+Method2:
+  Sliding Window Correlation
+           ↓
+      Logits (9×9 scores)
+           ↓
+      ┌────┴────┐
+      ↓         ↓
+  Softmax    Gaussian Fit
+  (weighted)  (geometric)
+      ↓         ↓
+   LOSS    Monitoring Only
+      ↓
+  Backprop
+      ↓
+  Model Learns!
+
+
+
+# Better resolutoin better result .
+[Best] Saved model from epoch 82: val_loss=0.6440  | val_rms_theta=0.4426 deg
+       Pixel RMS (m):   0.135 x, 0.135 y
+       Softmax RMS (m): 0.092 x, 0.114 y
+       Gaussian RMS (m): 0.135 x, 0.135 y
+
+
+# 3 reoslution data train , each datase show the fillment rate
+# Data fillment rate , bigger range.0.3047re 329x329 ,100mx100m will have lower lidar points fillment than the 150x150 , 30x30 0.2re
+
+# Edge case 000VFSWWAAkobywItdrErpC6fedKDWg4_020  05tM3HQakLPqAUqQ7iF7uBoar8V0o8WD_011
+
+# gaussian fit not differentiable , not include into loss only apply infer
+
+# train result softmax.
+# infer result gaussian

@@ -3,7 +3,7 @@ dataset:
   lidar_variant: gicp
   cache_rasters: true
   max_translation_px: 4
-  max_rotation_deg: 3
+  max_rotation_deg: 5
   train_fraction: 0.8
 
 model:
@@ -15,12 +15,14 @@ model:
   encoder_base_channels: 64
   proj_dim: 4
   search_radius: 4
-  theta_search_deg: 3
+  theta_search_deg: 5
   translation_smoothing_kernel: 1
   gaussian_sigma_px: 1.0
   w_xy: 1.0
   w_theta: 1.0
   gaussian_sigma_theta_deg: 1.0
+  sigma_weight_xy: 1.0
+  sigma_weight_theta: 1.0
 
 optim:
   lr: 0.0005

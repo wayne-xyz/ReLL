@@ -10,6 +10,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, random_split
 from torch.serialization import add_safe_globals
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from .config import (
     DatasetConfig,
@@ -34,10 +35,12 @@ class Trainer:
         criterion: LocalizationCriterion,
         optimizer: torch.optim.Optimizer,
         device: torch.device,
+        scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
     ):
         self.model = model.to(device)
         self.criterion = criterion.to(device)
         self.optimizer = optimizer
+        self.scheduler = scheduler
         self.device = device
 
     def _move_batch(self, batch: Dict[str, Tensor]) -> Dict[str, Tensor]:
@@ -46,8 +49,7 @@ class Trainer:
     def train_epoch(self, loader: DataLoader) -> Tuple[Dict[str, float], Dict[str, float]]:
         self.model.train()
         total_loss = 0.0
-        total_metrics = {"rms_x": 0.0, "rms_y": 0.0, "rms_theta": 0.0}
-        total_metrics = {"rms_x": 0.0, "rms_y": 0.0, "rms_theta": 0.0}
+        total_metrics: Dict[str, float] = {}
         count = 0
 
         t_fetch = t_to_dev = t_forward = t_loss = t_backward = t_step = 0.0
@@ -92,14 +94,17 @@ class Trainer:
             t_step += t11 - t10
 
             total_loss += loss.item()
-            for k in total_metrics:
-                total_metrics[k] += metrics[k].item()
+            if not total_metrics:
+                total_metrics = {key: 0.0 for key in metrics.keys()}
+            for key, value in metrics.items():
+                if key not in total_metrics:
+                    total_metrics[key] = 0.0
+                total_metrics[key] += float(value.item() if isinstance(value, Tensor) else value)
             count += 1
 
-        stats = {
-            "loss": total_loss / max(count, 1),
-            **{k: v / max(count, 1) for k, v in total_metrics.items()},
-        }
+        stats = {"loss": total_loss / max(count, 1)}
+        for key, total in total_metrics.items():
+            stats[key] = total / max(count, 1)
         times = {
             "fetch_per_batch": t_fetch / max(count, 1),
             "to_device_per_batch": t_to_dev / max(count, 1),
@@ -115,8 +120,7 @@ class Trainer:
     def evaluate(self, loader: DataLoader) -> Tuple[Dict[str, float], Dict[str, float]]:
         self.model.eval()
         total_loss = 0.0
-        total_metrics = {"rms_x": 0.0, "rms_y": 0.0, "rms_theta": 0.0}
-        total_metrics = {"rms_x": 0.0, "rms_y": 0.0, "rms_theta": 0.0}
+        total_metrics: Dict[str, float] = {}
         count = 0
 
         t_fetch = t_to_dev = t_forward = t_loss = 0.0
@@ -147,16 +151,17 @@ class Trainer:
             t_loss += t6 - t5
 
             total_loss += loss.item()
-            for k in total_metrics:
-                total_metrics[k] += metrics[k].item()
+            if not total_metrics:
+                total_metrics = {key: 0.0 for key in metrics.keys()}
+            for key, value in metrics.items():
+                if key not in total_metrics:
+                    total_metrics[key] = 0.0
+                total_metrics[key] += float(value.item() if isinstance(value, Tensor) else value)
             count += 1
 
-        stats = {
-            "val_loss": total_loss / max(count, 1),
-            "val_rms_x": total_metrics["rms_x"] / max(count, 1),
-            "val_rms_y": total_metrics["rms_y"] / max(count, 1),
-            "val_rms_theta": total_metrics["rms_theta"] / max(count, 1),
-        }
+        stats = {"val_loss": total_loss / max(count, 1)}
+        for key, total in total_metrics.items():
+            stats[f"val_{key}"] = total / max(count, 1)
         times = {
             "eval_fetch_per_batch": t_fetch / max(count, 1),
             "eval_to_device_per_batch": t_to_dev / max(count, 1),
@@ -170,12 +175,20 @@ class Trainer:
 def create_history_dict() -> Dict[str, list]:
     return {
         "train_loss": [],
-        "train_rms_x": [],
-        "train_rms_y": [],
+        "train_pxlevel_rms_x": [],
+        "train_pxlevel_rms_y": [],
+        "train_softmax_rms_x": [],
+        "train_softmax_rms_y": [],
+        "train_gaussian_rms_x": [],
+        "train_gaussian_rms_y": [],
         "train_rms_theta": [],
         "val_loss": [],
-        "val_rms_x": [],
-        "val_rms_y": [],
+        "val_pxlevel_rms_x": [],
+        "val_pxlevel_rms_y": [],
+        "val_softmax_rms_x": [],
+        "val_softmax_rms_y": [],
+        "val_gaussian_rms_x": [],
+        "val_gaussian_rms_y": [],
         "val_rms_theta": [],
         "epoch_time": [],
     }
@@ -270,7 +283,13 @@ def load_localization_model(
     optim_cfg: OptimConfig = checkpoint["optim_cfg"]
 
     model = LocalizationModel(model_cfg)
-    model.load_state_dict(checkpoint["model_state"])
+
+    # Remove old theta buffer if it exists (migration from old checkpoints)
+    state_dict = checkpoint["model_state"]
+    if "theta_candidates_deg" in state_dict:
+        state_dict.pop("theta_candidates_deg")
+
+    model.load_state_dict(state_dict, strict=False)
     model.to(device or optim_cfg.device)
 
     optimizer = None
@@ -318,8 +337,8 @@ def train_localization_model(
     model_cfg: ModelConfig,
     optim_cfg: OptimConfig,
     random_seed: int = 42,
-    save_cfg: Optional[SaveConfig] = SaveConfig(),
-    early_stop_cfg: Optional[EarlyStopConfig] = EarlyStopConfig(),
+    save_cfg: Optional[SaveConfig] = None,
+    early_stop_cfg: Optional[EarlyStopConfig] = None,
     subset_fraction: float = 1.0,
 ):
     root = Path(processed_raster_data_dir)
@@ -340,8 +359,11 @@ def train_localization_model(
         sample_dirs = sample_dirs[:subset_count]
         print(f"[Subset] Using {subset_count}/{original_count} samples (~{subset_fraction * 100:.1f}%).")
 
-    dataset_cfg.sample_root = sample_dirs
+    dataset_cfg.sample_root = tuple(sample_dirs)
     dataset_cfg.raster_builder = raster_builder_from_processed_dir
+
+    if save_cfg is None:
+        raise ValueError("save_cfg must be provided; load_default_configs returns a populated instance.")
 
     full_dataset = GeoAlignRasterDataset(dataset_cfg)
     n_total = len(full_dataset)
@@ -373,13 +395,30 @@ def train_localization_model(
     print("map  :", batch["map"].shape)
 
     model = LocalizationModel(model_cfg)
-    criterion = LocalizationCriterion(model_cfg)
+    criterion = LocalizationCriterion(model_cfg, downsampling_factor=model.downsampling_factor)
     optimizer = build_optimizer(model, optim_cfg)
-    trainer = Trainer(model, criterion, optimizer, device=torch.device(optim_cfg.device))
+    
+    # Dynamic learning rate scheduler: reduce LR when validation loss plateaus
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.5,
+        patience=3,
+        threshold=1e-4,
+        threshold_mode="rel",
+    )
+
+    print(f"[Model] Feature downsampling factor: {model.downsampling_factor}x (original resolution preserved)")
+    print(f"[Model] Using Gaussian peak fitting for sub-pixel refinement")
+
+    trainer = Trainer(model, criterion, optimizer, device=torch.device(optim_cfg.device), scheduler=scheduler)
 
     history = create_history_dict()
 
     best_value: Optional[float] = None
+    best_epoch_stats: Optional[Dict[str, float]] = None
+    best_epoch: Optional[int] = None
+    best_epoch_stats: Optional[Dict[str, float]] = None
     best_ckpt_path: Optional[Path] = None
     if save_cfg and save_cfg.enable:
         save_dir = _ensure_dir(save_cfg.save_dir)
@@ -403,6 +442,15 @@ def train_localization_model(
     else:
         print("[EarlyStop] Disabled")
 
+    def _fmt_stat(stats: Dict[str, float], key: str, precision: str = ".3f") -> str:
+        value = stats.get(key)
+        if value is None:
+            return "n/a"
+        try:
+            return format(float(value), precision)
+        except (TypeError, ValueError):
+            return "n/a"
+
     total_epochs = optim_cfg.epochs
 
     for epoch in range(total_epochs):
@@ -414,12 +462,20 @@ def train_localization_model(
         eval_time_total = time.perf_counter() - eval_start
 
         history["train_loss"].append(train_stats["loss"])
-        history["train_rms_x"].append(train_stats["rms_x"])
-        history["train_rms_y"].append(train_stats["rms_y"])
+        history["train_pxlevel_rms_x"].append(train_stats["pxlevel_rms_x"])
+        history["train_pxlevel_rms_y"].append(train_stats["pxlevel_rms_y"])
+        history["train_softmax_rms_x"].append(train_stats["softmax_rms_x"])
+        history["train_softmax_rms_y"].append(train_stats["softmax_rms_y"])
+        history["train_gaussian_rms_x"].append(train_stats["gaussian_rms_x"])
+        history["train_gaussian_rms_y"].append(train_stats["gaussian_rms_y"])
         history["train_rms_theta"].append(train_stats["rms_theta"])
         history["val_loss"].append(val_stats["val_loss"])
-        history["val_rms_x"].append(val_stats["val_rms_x"])
-        history["val_rms_y"].append(val_stats["val_rms_y"])
+        history["val_pxlevel_rms_x"].append(val_stats["val_pxlevel_rms_x"])
+        history["val_pxlevel_rms_y"].append(val_stats["val_pxlevel_rms_y"])
+        history["val_softmax_rms_x"].append(val_stats["val_softmax_rms_x"])
+        history["val_softmax_rms_y"].append(val_stats["val_softmax_rms_y"])
+        history["val_gaussian_rms_x"].append(val_stats["val_gaussian_rms_x"])
+        history["val_gaussian_rms_y"].append(val_stats["val_gaussian_rms_y"])
         history["val_rms_theta"].append(val_stats["val_rms_theta"])
 
         epoch_time = time.perf_counter() - epoch_start
@@ -455,6 +511,8 @@ def train_localization_model(
                 current_value = float(val_stats[save_cfg.monitor])
                 if _is_better(current_value, best_value, save_cfg.mode):
                     best_value = current_value
+                    best_epoch_stats = {**train_stats, **val_stats}
+                    best_epoch = epochs_done
                     save_checkpoint(
                         payload,
                         resolve_checkpoint(save_cfg.save_dir, "best", save_cfg.filename_best, save_cfg.filename_last),
@@ -467,23 +525,38 @@ def train_localization_model(
         def fmt(ms: float) -> str:
             return f"{ms * 1000:.1f} ms"
 
+        # Print training metrics showing all 3 levels with clear RMS notation
         print(
             f"Epoch {epochs_done:02d}/{total_epochs}: "
-            f"train_loss={train_stats['loss']:.4f}  "
-            f"| train_rms_x={train_stats['rms_x']:.3f} m  "
-            f"| train_rms_y={train_stats['rms_y']:.3f} m  "
-            f"| train_rms_theta={train_stats['rms_theta']:.4f} deg  ||  "
-            f"| train_rms_theta={train_stats['rms_theta']:.4f} deg  ||  "
-            f"val_loss={val_stats['val_loss']:.4f}  "
-            f"| val_rms_x={val_stats['val_rms_x']:.3f} m  "
-            f"| val_rms_y={val_stats['val_rms_y']:.3f} m  "
-            f"| val_rms_theta={val_stats['val_rms_theta']:.4f} deg",
+            f"train_loss={_fmt_stat(train_stats, 'loss', '.4f')}  "
+            f"| val_loss={_fmt_stat(val_stats, 'val_loss', '.4f')}  "
+            f"| train_rms_theta={_fmt_stat(train_stats, 'rms_theta', '.4f')} deg  "
+            f"| val_rms_theta={_fmt_stat(val_stats, 'val_rms_theta', '.4f')} deg"
         )
         print(
-            f" Epoch time={epoch_time:.2f}s  "
-            f"| remaining≈{_fmt_secs(est_remaining_secs)}  "
-            f"(ETA ~ {finish_at_dt.strftime('%Y-%m-%d %H:%M:%S')})",
+            "         Pixel RMS (m):      "
+            f"train=({_fmt_stat(train_stats, 'pxlevel_rms_x')} x, {_fmt_stat(train_stats, 'pxlevel_rms_y')} y)  "
+            f"| val=({_fmt_stat(val_stats, 'val_pxlevel_rms_x')} x, {_fmt_stat(val_stats, 'val_pxlevel_rms_y')} y)"
         )
+        print(
+            "         Softmax RMS (m):    "
+            f"train=({_fmt_stat(train_stats, 'softmax_rms_x')} x, {_fmt_stat(train_stats, 'softmax_rms_y')} y)  "
+            f"| val=({_fmt_stat(val_stats, 'val_softmax_rms_x')} x, {_fmt_stat(val_stats, 'val_softmax_rms_y')} y)"
+        )
+        print(
+            "         Gaussian RMS (m):   "
+            f"train=({_fmt_stat(train_stats, 'gaussian_rms_x')} x, {_fmt_stat(train_stats, 'gaussian_rms_y')} y)  "
+            f"| val=({_fmt_stat(val_stats, 'val_gaussian_rms_x')} x, {_fmt_stat(val_stats, 'val_gaussian_rms_y')} y)"
+        )
+        print(
+            f"         Time: {epoch_time:.2f}s | "
+            f"Remaining: {_fmt_secs(est_remaining_secs)} | "
+            f"ETA: {finish_at_dt.strftime('%H:%M:%S')}"
+        )
+
+        # Update learning rate based on validation loss
+        if trainer.scheduler is not None:
+            trainer.scheduler.step(val_stats["val_loss"])
 
         if stopper.step(epochs_done, val_stats):
             print(
@@ -503,6 +576,28 @@ def train_localization_model(
             break
 
     print("Training complete.")
+    if best_epoch_stats is not None and best_epoch is not None:
+        print(
+            f"[Best] Saved model from epoch {best_epoch}: "
+            f"val_loss={_fmt_stat(best_epoch_stats, 'val_loss', '.4f')}"
+        )
+        print(
+            "       Theta RMS (deg):     "
+            f"train={_fmt_stat(best_epoch_stats, 'rms_theta', '.4f')}  "
+            f"| val={_fmt_stat(best_epoch_stats, 'val_rms_theta', '.4f')}"
+        )
+        print(
+            "       Pixel RMS (m):      "
+            f"{_fmt_stat(best_epoch_stats, 'val_pxlevel_rms_x')} x, {_fmt_stat(best_epoch_stats, 'val_pxlevel_rms_y')} y"
+        )
+        print(
+            "       Softmax RMS (m):    "
+            f"{_fmt_stat(best_epoch_stats, 'val_softmax_rms_x')} x, {_fmt_stat(best_epoch_stats, 'val_softmax_rms_y')} y"
+        )
+        print(
+            "       Gaussian RMS (m):   "
+            f"{_fmt_stat(best_epoch_stats, 'val_gaussian_rms_x')} x, {_fmt_stat(best_epoch_stats, 'val_gaussian_rms_y')} y"
+        )
     return model, criterion, optimizer, trainer, history
 
 
