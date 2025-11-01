@@ -51,6 +51,20 @@ def load_checkpoint(ckpt_path: Path, device: str = "cpu") -> Tuple[LocalizationM
         pass
     add_safe_globals(safe_types)
 
+    # On Windows, unpickled objects saved on POSIX systems may contain pathlib.PosixPath
+    # which raises NotImplementedError when instantiated on Windows. Map PosixPath to
+    # WindowsPath so unpickling succeeds.
+    try:
+        import os
+        import pathlib
+
+        if os.name == "nt":
+            # Monkeypatch PosixPath to WindowsPath for safe unpickling
+            pathlib.PosixPath = pathlib.WindowsPath
+    except Exception:
+        # Best-effort: if imports or mapping fail, proceed and let torch.load raise if needed
+        pass
+
     # Load checkpoint
     checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
 
