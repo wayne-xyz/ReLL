@@ -365,6 +365,50 @@ This rich dataset enables:
 
 ---
 
+## Raster data (training-ready)
+
+In addition to the raw LiDAR/pose/map formats described above, we also produce "rasterized" training data used by the models in this repository. The script and helpers that perform this conversion live in `Data-pipeline-fetch/raster.py`.
+
+What the raster preparation does (high-level):
+- Reads processed point-cloud samples, pose and calibration data produced by the pipeline.
+- Transforms sensor-frame points into a common geographic/city frame using the calibration and `city_SE3_egovehicle` poses.
+- Reprojects the 3D points into a 2D image grid (raster) at a chosen spatial resolution (meters/pixel). Each pixel represents a small ground area.
+- Rasterizes point attributes into per-pixel channels (for example: height/elevation, intensity, point count, or DSM/DEM layers). A simple height-channel often stores the height value for the highest (or average) point that falls into that pixel.
+- Writes out tiles/arrays (numpy, image, or TFRecord depending on config) together with metadata describing coordinate transforms, resolution and any offsets applied.
+
+How to use `Data-pipeline-fetch/raster.py` (overview):
+- The file contains helpers and a small CLI to convert processed sample folders into raster tiles. You can either run it as a script on a directory of processed samples or import the module and call the helper functions from Python to customize parameters like tile size, resolution, and output format.
+- Typical parameters you will choose: input sample directory, output directory, tile size (meters), raster resolution (meters/pixel), and whether to aggregate using max/min/mean for the height channel.
+
+Why we apply a vertical shift when projecting heights into the raster image
+- Coordinate reference differences: LiDAR points after transformation to the city frame have Z values in the city coordinate (often meters relative to some city/UTM origin). Raster products (DSM/DEM or image storage formats) may assume a different baseline (surface elevation, zero at sea-level, or a cropped tile origin). Directly storing raw Z values can lead to negative numbers or a large dynamic range that complicates on-disk formats and model training.
+- Numerical stability and discretization: Many image formats and training pipelines expect non-negative values (e.g., uint8 or normalized floats). Adding a constant vertical shift (and recording it in metadata) moves all heights into a stable positive range and keeps quantization consistent across tiles.
+- Removing sensor mounting bias: The LiDAR Z includes vehicle mounting height and vehicle motion. For some tasks we want heights relative to ground or relative to a digital surface model — applying a vertical offset lets us align the point heights with the raster reference surface (DSM/DEM) before storing.
+- Occlusion handling / z-buffering: When multiple points fall into the same pixel, the rasterization rule (max, min, mean) interacts with vertical offsets. Using a fixed vertical shift consistently ensures the chosen aggregator behaves predictably across tiles and logs.
+
+Simple formula (conceptual):
+
+projected_pixel_value = (z_point - z_tile_base) + vertical_shift
+
+Where:
+- `z_point` is the point Z in the city frame (meters).
+- `z_tile_base` is the base elevation or reference for the output tile (for example the DEM value or tile origin elevation).
+- `vertical_shift` is a constant added so stored values are positive and numerically stable for the chosen output type.
+
+Practical example:
+- If LiDAR heights in a neighborhood are around -15 m (city frame origin placed above the area) and we want uint8 storage, adding +20 m moves values into the 0–255-ish range after any scaling. The exact shift value and scaling factor must be stored in tile metadata so loaders can convert back to real-world meters for evaluation.
+
+Edge cases and best-practices
+- Always store the vertical shift, resolution and coordinate transform inside the tile metadata (JSON sidecar or header) so training and inference code can invert the transformation.
+- Choose the raster aggregator (max/min/mean) according to the downstream task. For ground height estimation, min/percentile is often more robust; for surface objects (cars, trees) max is common.
+- Validate by overlaying transformed 3D points on the produced raster (color points by stored pixel height) — visual inspection catches sign/shift errors quickly.
+
+Verification steps
+- Visualize a few tiles and overlay original (transformed) points colored by height.
+- Check histograms of stored height-channel values to ensure they fall in the expected range and that the vertical shift was applied.
+- Confirm metadata keys (resolution, vertical_shift, tile_origin) are present for each tile.
+
+
 **Next Steps:**
 - See `Data_pipeline/README.md` for processing pipeline
 - See `Data-pipeline-fetch/README.md` for downloading and processing automation
