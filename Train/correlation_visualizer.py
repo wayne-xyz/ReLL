@@ -23,9 +23,7 @@ Method 3: Gaussian Peak Fitting (Sub-pixel, 3×3 Parabolic)
     - Imported from: _gaussian_peak_fit_single() in infer_visualize.py
     - Note: fit_gaussian_surface() provides broader fit for visualization only
 
-The script can render:
-- 3D point cloud of correlation scores with all three methods marked
-- 2D contour panels comparing the three methods side-by-side
+The script renders 2D contour panels comparing the three methods side-by-side.
 """
 
 import argparse
@@ -49,40 +47,6 @@ from Train.infer_visualize import (  # noqa: E402
     _gaussian_peak_fit_single,
     _softmax_refinement,
 )
-
-
-def correlation_to_grid(
-    heatmap: torch.Tensor,
-    resolution: float,
-    use_meters: bool,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Convert correlation heatmap to flattened coordinate/value arrays.
-
-    Args:
-        heatmap: 2D tensor of correlation scores (centered search window).
-        resolution: Map resolution in meters per pixel.
-        use_meters: If True, convert x/y offsets to meters.
-
-    Returns:
-        tuple of numpy arrays (x_coords, y_coords, z_scores).
-    """
-    heatmap_np = heatmap.cpu().numpy()
-    H, W = heatmap_np.shape
-    center_row = H // 2
-    center_col = W // 2
-
-    y_offsets = np.arange(H) - center_row
-    x_offsets = np.arange(W) - center_col
-    X, Y = np.meshgrid(x_offsets, y_offsets)
-
-    if use_meters:
-        X = X * resolution
-        Y = Y * resolution
-
-    Z = heatmap_np
-    return X.flatten(), Y.flatten(), Z.flatten()
-
 
 def bilinear_sample(heatmap: torch.Tensor, x_offset: float, y_offset: float) -> float:
     """Sample heatmap at fractional (x, y) offsets relative to window center."""
@@ -669,140 +633,6 @@ def _axis_aligned_gaussian_surface(
     return gaussian_surface, sigma_x, sigma_y
 
 
-def plot_correlation_3d(
-    x_coords: np.ndarray,
-    y_coords: np.ndarray,
-    z_scores: np.ndarray,
-    peak_x: float,
-    peak_y: float,
-    peak_score: float,
-    use_meters: bool,
-    softmax_point: tuple[float, float, float] | None = None,
-    gaussian_point: tuple[float, float, float] | None = None,
-    gaussian_surface: np.ndarray | None = None,
-    gaussian_mu: tuple[float, float] | None = None,
-    gaussian_sigma: tuple[float, float] | None = None,
-    resolution: float = 1.0,
-    save_path: Path | None = None,
-) -> None:
-    """
-    Render 3D scatter of correlation scores with peak highlighted.
-
-    Optionally overlays a fitted Gaussian surface to show the continuous approximation.
-    """
-    unit = "m" if use_meters else "px"
-    fig = plt.figure(figsize=(14, 10))
-    ax = fig.add_subplot(111, projection="3d")
-
-    # Plot discrete correlation points
-    scatter = ax.scatter(
-        x_coords,
-        y_coords,
-        z_scores,
-        c=z_scores,
-        cmap="coolwarm",
-        marker="o",
-        s=30,
-        alpha=0.6,
-        label="Correlation heatmap",
-    )
-
-    # Plot Gaussian surface if provided
-    if gaussian_surface is not None and gaussian_mu is not None:
-        # Create mesh grid for surface
-        H, W = gaussian_surface.shape
-        center_row = H // 2
-        center_col = W // 2
-        x_offsets_px = np.arange(W) - center_col
-        y_offsets_px = np.arange(H) - center_row
-        X_px, Y_px = np.meshgrid(x_offsets_px, y_offsets_px)
-
-        if use_meters:
-            X_surf = X_px * resolution
-            Y_surf = Y_px * resolution
-        else:
-            X_surf = X_px
-            Y_surf = Y_px
-
-        # Plot the Gaussian surface
-        surf = ax.plot_surface(
-            X_surf,
-            Y_surf,
-            gaussian_surface,
-            cmap="viridis",
-            alpha=0.4,
-            linewidth=0,
-            antialiased=True,
-            label="Gaussian fit surface",
-        )
-
-    # Mark discrete peak
-    ax.scatter(
-        [peak_x],
-        [peak_y],
-        [peak_score],
-        c="gold",
-        s=180,
-        marker="*",
-        edgecolors="black",
-        linewidths=2.0,
-        label=f"Peak ({peak_x:.2f}{unit}, {peak_y:.2f}{unit})",
-        zorder=10,
-    )
-
-    # Mark softmax refinement
-    if softmax_point is not None:
-        sx, sy, sz = softmax_point
-        ax.scatter(
-            [sx],
-            [sy],
-            [sz],
-            c="red",
-            s=140,
-            marker="^",
-            edgecolors="white",
-            linewidths=1.5,
-            label=f"Softmax μ ({sx:.2f}{unit}, {sy:.2f}{unit})",
-            zorder=10,
-        )
-
-    # Mark Gaussian peak
-    if gaussian_point is not None:
-        gx, gy, gz = gaussian_point
-        ax.scatter(
-            [gx],
-            [gy],
-            [gz],
-            facecolors="yellow",
-            edgecolors="black",
-            s=150,
-            marker="s",
-            linewidths=2.0,
-            label=f"Gaussian μ ({gx:.2f}{unit}, {gy:.2f}{unit})",
-            zorder=10,
-        )
-
-    ax.set_title(
-        "Translation Cross-Correlation with Gaussian Surface (3D)",
-        fontsize=14,
-        fontweight="bold",
-    )
-    ax.set_xlabel(f"ΔX ({unit})", fontsize=11)
-    ax.set_ylabel(f"ΔY ({unit})", fontsize=11)
-    ax.set_zlabel("Correlation score", fontsize=11)
-    ax.legend(loc="upper left", fontsize=9)
-    fig.colorbar(scatter, ax=ax, shrink=0.6, pad=0.1, label="Correlation")
-    ax.view_init(elev=30, azim=135)
-    plt.tight_layout()
-
-    if save_path is not None:
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(save_path, dpi=180, bbox_inches="tight")
-        print(f"[Save] 3D correlation plot saved to: {save_path}")
-
-    plt.show()
-
-
 def plot_correlation_2d(
     heatmap: torch.Tensor,
     softmax_probs: torch.Tensor,
@@ -972,7 +802,7 @@ def plot_correlation_2d(
         alpha=0.8,
     )
 
-    # Add contour lines for 3D-like appearance
+    # Add contour lines for additional depth cues
     contour_lines = axes[2].contour(
         X_plot,
         Y_plot,
@@ -1091,7 +921,7 @@ def plot_correlation_2d(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Visualize ReLL translation cross-correlation (3D point cloud or 2D contour panels)."
+        description="Visualize ReLL translation cross-correlation with detailed 2D contour panels."
     )
     parser.add_argument(
         "--checkpoint",
@@ -1122,15 +952,7 @@ def main() -> None:
         "--save",
         type=Path,
         default=None,
-        help="Optional path to save the 3D plot (e.g., output.png).",
-    )
-    parser.add_argument(
-        "--mode",
-        "--model",
-        dest="mode",
-        choices=["3d", "2d"],
-        default="3d",
-        help="Visualization mode: '3d' for point cloud, '2d' for contour comparisons.",
+        help="Optional path to save the visualization (e.g., output.png).",
     )
     parser.add_argument(
         "--meters",
@@ -1170,9 +992,6 @@ def main() -> None:
     heatmap = results["correlation_heatmap"]
     radius_px = results.get("correlation_radius_px", heatmap.shape[-1] // 2)
 
-    # Flatten grid
-    x_pts, y_pts, z_scores = correlation_to_grid(heatmap, resolution, args.meters)
-
     # Extract discrete peak info (already centered grid)
     peak_idx = int(torch.argmax(heatmap))
     H, W = heatmap.shape
@@ -1182,12 +1001,6 @@ def main() -> None:
     center_col = W // 2
     peak_y_offset = peak_row - center_row
     peak_x_offset = peak_col - center_col
-    if args.meters:
-        peak_x_display = peak_x_offset * resolution
-        peak_y_display = peak_y_offset * resolution
-    else:
-        peak_x_display = float(peak_x_offset)
-        peak_y_display = float(peak_y_offset)
     peak_score = float(heatmap[peak_row, peak_col].item())
 
     (
@@ -1210,17 +1023,6 @@ def main() -> None:
 
     softmax_score = bilinear_sample(heatmap, softmax_mu_x_px, softmax_mu_y_px)
     gaussian_score = bilinear_sample(heatmap, gaussian_mu_x_px, gaussian_mu_y_px)
-
-    if args.meters:
-        softmax_disp_x = softmax_mu_x_px * resolution
-        softmax_disp_y = softmax_mu_y_px * resolution
-        gaussian_disp_x = gaussian_mu_x_px * resolution
-        gaussian_disp_y = gaussian_mu_y_px * resolution
-    else:
-        softmax_disp_x = float(softmax_mu_x_px)
-        softmax_disp_y = float(softmax_mu_y_px)
-        gaussian_disp_x = float(gaussian_mu_x_px)
-        gaussian_disp_y = float(gaussian_mu_y_px)
 
     # Calculate distances from ground truth (0, 0) for final summary
     import math
@@ -1268,42 +1070,24 @@ def main() -> None:
     print("=" * 70)
 
     if args.vis:
-        if args.mode == "3d":
-            plot_correlation_3d(
-                x_pts,
-                y_pts,
-                z_scores,
-                peak_x_display,
-                peak_y_display,
-                peak_score,
-                use_meters=args.meters,
-                softmax_point=(softmax_disp_x, softmax_disp_y, softmax_score),
-                gaussian_point=(gaussian_disp_x, gaussian_disp_y, gaussian_score),
-                gaussian_surface=gaussian_fit.surface,
-                gaussian_mu=(gaussian_mu_x_px, gaussian_mu_y_px),
-                gaussian_sigma=(gaussian_sigma_x_px, gaussian_sigma_y_px),
-                resolution=resolution,
-                save_path=args.save,
-            )
-        else:
-            plot_correlation_2d(
-                heatmap,
-                softmax_probs,
-                (softmax_mu_x_px, softmax_mu_y_px),
-                (softmax_sigma_x_px, softmax_sigma_y_px),
-                (gaussian_mu_x_px, gaussian_mu_y_px),
-                gaussian_fit.surface,
-                (gaussian_sigma_x_px, gaussian_sigma_y_px),
-                resolution,
-                use_meters=args.meters,
-                peak_offset=(peak_x_offset, peak_y_offset),
-                peak_score=peak_score,
-                softmax_score=softmax_score,
-                gaussian_score=gaussian_score,
-                gaussian_success=gaussian_fit.success,
-                gaussian_cov_xy=gaussian_fit.cov_xy,
-                save_path=args.save,
-            )
+        plot_correlation_2d(
+            heatmap,
+            softmax_probs,
+            (softmax_mu_x_px, softmax_mu_y_px),
+            (softmax_sigma_x_px, softmax_sigma_y_px),
+            (gaussian_mu_x_px, gaussian_mu_y_px),
+            gaussian_fit.surface,
+            (gaussian_sigma_x_px, gaussian_sigma_y_px),
+            resolution,
+            use_meters=args.meters,
+            peak_offset=(peak_x_offset, peak_y_offset),
+            peak_score=peak_score,
+            softmax_score=softmax_score,
+            gaussian_score=gaussian_score,
+            gaussian_success=gaussian_fit.success,
+            gaussian_cov_xy=gaussian_fit.cov_xy,
+            save_path=args.save,
+        )
     else:
         print("\n[Info] Skipping visualization (use --vis to show plots)")
         print("[Done] Results printed above.")
