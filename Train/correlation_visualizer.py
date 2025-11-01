@@ -21,13 +21,11 @@ Method 3: Gaussian Peak Fitting (Sub-pixel, 3×3 Parabolic)
     - Uses simple, robust log-space quadratic fitting
     - Most accurate for sharp, well-defined peaks
     - Imported from: _gaussian_peak_fit_single() in infer_visualize.py
-    - Note: fit_gaussian_surface() provides broader fit for visualization only
 
 The script renders 2D contour panels comparing the three methods side-by-side.
 """
 
 import argparse
-from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -80,264 +78,6 @@ def bilinear_sample(heatmap: torch.Tensor, x_offset: float, y_offset: float) -> 
     return float(value)
 
 
-@dataclass
-class GaussianFitResult:
-    surface: np.ndarray
-    mu_x: float
-    mu_y: float
-    sigma_x: float
-    sigma_y: float
-    cov_xy: float
-    amplitude: float
-    baseline: float
-    success: bool
-
-
-def fit_gaussian_surface(
-    heatmap: torch.Tensor,
-    patch_radius: int = 5,
-) -> GaussianFitResult:
-    """
-    Fit a full 2D Gaussian (with covariance) to the heatmap around its peak.
-
-    Returns the reconstructed surface over the entire search window along with
-    sub-pixel peak location and covariance statistics. Falls back to the
-    original axis-aligned approximation if the least-squares fit is unstable.
-    """
-    heat_np = heatmap.cpu().numpy()
-    H, W = heat_np.shape
-    center_row = H // 2
-    center_col = W // 2
-
-    x_offsets = np.arange(W) - center_col
-    y_offsets = np.arange(H) - center_row
-    X, Y = np.meshgrid(x_offsets, y_offsets)
-
-    peak_idx = int(np.argmax(heat_np))
-    peak_row = peak_idx // W
-    peak_col = peak_idx % W
-
-    row_start = max(0, peak_row - patch_radius)
-    row_end = min(H, peak_row + patch_radius + 1)
-    col_start = max(0, peak_col - patch_radius)
-    col_end = min(W, peak_col + patch_radius + 1)
-
-    X_patch = X[row_start:row_end, col_start:col_end]
-    Y_patch = Y[row_start:row_end, col_start:col_end]
-    Z_patch = heat_np[row_start:row_end, col_start:col_end]
-
-    if Z_patch.size < 6:
-        return _gaussian_surface_fallback(
-            heatmap,
-            heat_np,
-            X,
-            Y,
-            patch_radius,
-        )
-
-    patch_min = float(Z_patch.min())
-    eps = 1e-6
-    if patch_min <= 0:
-        offset = -patch_min + eps
-    else:
-        offset = eps
-    Z_shifted = Z_patch + offset
-    Z_shifted = np.clip(Z_shifted, eps, None)
-
-    x = X_patch.reshape(-1).astype(np.float64)
-    y = Y_patch.reshape(-1).astype(np.float64)
-    z = Z_shifted.reshape(-1).astype(np.float64)
-    log_z = np.log(z)
-
-    weights = np.clip(z, eps, None)
-    weights = weights**1.5
-    weights /= max(weights.max(), eps)
-    sqrt_w = np.sqrt(weights)
-
-    design = np.stack(
-        [
-            np.ones_like(x),
-            x,
-            y,
-            x**2,
-            x * y,
-            y**2,
-        ],
-        axis=1,
-    )
-
-    try:
-        coeff, *_ = np.linalg.lstsq(design * sqrt_w[:, None], log_z * sqrt_w, rcond=None)
-    except np.linalg.LinAlgError:
-        return _gaussian_surface_fallback(
-            heatmap,
-            heat_np,
-            X,
-            Y,
-            patch_radius,
-        )
-
-    if not np.all(np.isfinite(coeff)):
-        return _gaussian_surface_fallback(
-            heatmap,
-            heat_np,
-            X,
-            Y,
-            patch_radius,
-        )
-
-    c0, c1, c2, c3, c4, c5 = coeff
-    sigma_inv = np.array(
-        [
-            [-2.0 * c3, -c4],
-            [-c4, -2.0 * c5],
-        ],
-        dtype=np.float64,
-    )
-
-    if not np.all(np.isfinite(sigma_inv)):
-        return _gaussian_surface_fallback(
-            heatmap,
-            heat_np,
-            X,
-            Y,
-            patch_radius,
-        )
-
-    det = float(np.linalg.det(sigma_inv))
-    if det <= 1e-12 or sigma_inv[0, 0] <= 0.0 or sigma_inv[1, 1] <= 0.0:
-        return _gaussian_surface_fallback(
-            heatmap,
-            heat_np,
-            X,
-            Y,
-            patch_radius,
-        )
-
-    try:
-        mu_vec = np.linalg.solve(sigma_inv, np.array([c1, c2], dtype=np.float64))
-    except np.linalg.LinAlgError:
-        return _gaussian_surface_fallback(
-            heatmap,
-            heat_np,
-            X,
-            Y,
-            patch_radius,
-        )
-
-    if not np.all(np.isfinite(mu_vec)):
-        return _gaussian_surface_fallback(
-            heatmap,
-            heat_np,
-            X,
-            Y,
-            patch_radius,
-        )
-
-    peak_x_offset = x_offsets[peak_col]
-    peak_y_offset = y_offsets[peak_row]
-    if (abs(mu_vec[0] - peak_x_offset) > patch_radius + 1.5) or (
-        abs(mu_vec[1] - peak_y_offset) > patch_radius + 1.5
-    ):
-        return _gaussian_surface_fallback(
-            heatmap,
-            heat_np,
-            X,
-            Y,
-            patch_radius,
-        )
-
-    try:
-        sigma = np.linalg.inv(sigma_inv)
-    except np.linalg.LinAlgError:
-        return _gaussian_surface_fallback(
-            heatmap,
-            heat_np,
-            X,
-            Y,
-            patch_radius,
-        )
-
-    if not np.all(np.isfinite(sigma)):
-        return _gaussian_surface_fallback(
-            heatmap,
-            heat_np,
-            X,
-            Y,
-            patch_radius,
-        )
-
-    sigma_x = float(np.sqrt(max(sigma[0, 0], 1e-9)))
-    sigma_y = float(np.sqrt(max(sigma[1, 1], 1e-9)))
-    cov_xy = float(sigma[0, 1])
-
-    mu_col = mu_vec[0] + center_col
-    mu_row = mu_vec[1] + center_row
-    if mu_col < 0 or mu_col > (W - 1) or mu_row < 0 or mu_row > (H - 1):
-        return _gaussian_surface_fallback(
-            heatmap,
-            heat_np,
-            X,
-            Y,
-            patch_radius,
-        )
-
-    mu_vec_col = mu_vec.reshape(2, 1)
-    log_amp = float(c0 + 0.5 * (mu_vec_col.T @ sigma_inv @ mu_vec_col))
-
-    coords = np.stack([X.reshape(-1), Y.reshape(-1)], axis=1)
-    deltas = coords - mu_vec
-    quad = np.einsum("ni,ij,nj->n", deltas, sigma_inv, deltas)
-    surface_shifted = np.exp(log_amp - 0.5 * quad).reshape(H, W)
-    surface = surface_shifted - offset
-    surface = np.clip(surface, a_min=heat_np.min(), a_max=None)
-    amplitude = max(float(surface_shifted.max() - offset), eps)
-    baseline = float(surface.min())
-
-    return GaussianFitResult(
-        surface=surface,
-        mu_x=float(mu_vec[0]),
-        mu_y=float(mu_vec[1]),
-        sigma_x=sigma_x,
-        sigma_y=sigma_y,
-        cov_xy=cov_xy,
-        amplitude=amplitude,
-        baseline=baseline,
-        success=True,
-    )
-
-
-def _gaussian_surface_fallback(
-    heatmap: torch.Tensor,
-    heat_np: np.ndarray,
-    X: np.ndarray,
-    Y: np.ndarray,
-    patch_radius: int,
-) -> GaussianFitResult:
-    mu_x_px, mu_y_px = _gaussian_peak_fit_single(heatmap)
-    gaussian_surface, sigma_x, sigma_y = _axis_aligned_gaussian_surface(
-        heat_np,
-        X,
-        Y,
-        mu_x_px,
-        mu_y_px,
-        patch_radius,
-    )
-    baseline = float(gaussian_surface.min())
-    amplitude = float(gaussian_surface.max() - baseline)
-    return GaussianFitResult(
-        surface=gaussian_surface,
-        mu_x=mu_x_px,
-        mu_y=mu_y_px,
-        sigma_x=sigma_x,
-        sigma_y=sigma_y,
-        cov_xy=0.0,
-        amplitude=amplitude,
-        baseline=baseline,
-        success=False,
-    )
-
-
 def _gaussian_peak_fit_single_improved(heatmap: torch.Tensor) -> tuple[float, float]:
     """
     Enhanced sub-pixel refinement that fuses several estimators:
@@ -345,7 +85,6 @@ def _gaussian_peak_fit_single_improved(heatmap: torch.Tensor) -> tuple[float, fl
     1) Weighted centroid (robust baseline)
     2) 1D parabolic refinement along X/Y using bilinear samples
     3) 2D quadratic least-squares fit over the 3×3 neighborhood (raw values)
-    4) Full Gaussian surface fit (radius 4) when stable
 
     The method selects the candidate with the highest interpolated correlation score,
     ensuring we never regress behind the robust weighted baseline while capturing sharper
@@ -530,14 +269,6 @@ def _gaussian_peak_fit_single_improved(heatmap: torch.Tensor) -> tuple[float, fl
                         base_y = row - H // 2
                         add_candidate(base_x + dx, base_y + dy)
 
-    # Larger context Gaussian surface fit (radius 4) for sharper peaks.
-    try:
-        surface_fit = fit_gaussian_surface(heatmap, patch_radius=4)
-    except Exception:
-        surface_fit = None
-    if surface_fit is not None and surface_fit.success:
-        add_candidate(surface_fit.mu_x, surface_fit.mu_y)
-
     # Blend high-scoring peak with softmax centroid when the heatmap is broad.
     if softmax_mu_x is not None and candidates:
         best_raw_score, best_raw_x, best_raw_y = max(candidates, key=lambda item: item[0])
@@ -577,78 +308,18 @@ def _gaussian_peak_fit_single_improved(heatmap: torch.Tensor) -> tuple[float, fl
     return float(best_x), float(best_y)
 
 
-def _axis_aligned_gaussian_surface(
-    heat_np: np.ndarray,
-    X: np.ndarray,
-    Y: np.ndarray,
-    mu_x_px: float,
-    mu_y_px: float,
-    patch_radius: int,
-) -> tuple[np.ndarray, float, float]:
-    shifted = heat_np - heat_np.min() + 1e-6
-    X_rel = X - mu_x_px
-    Y_rel = Y - mu_y_px
-    mask = (np.abs(X_rel) <= patch_radius) & (np.abs(Y_rel) <= patch_radius)
-
-    X_sel = X_rel[mask].reshape(-1)
-    Y_sel = Y_rel[mask].reshape(-1)
-    Z_sel = shifted[mask].reshape(-1)
-    valid = Z_sel > 0
-
-    if valid.sum() < 5:
-        default_sigma = max(2.0, patch_radius / 2.0)
-        gaussian_surface = np.exp(
-            -((X_rel) ** 2) / (2 * default_sigma**2) - ((Y_rel) ** 2) / (2 * default_sigma**2)
-        )
-        return gaussian_surface, default_sigma, default_sigma
-
-    X_sel = X_sel[valid]
-    Y_sel = Y_sel[valid]
-    Z_sel = Z_sel[valid]
-
-    A = np.stack(
-        [
-            np.ones_like(X_sel),
-            -(X_sel**2),
-            -(Y_sel**2),
-        ],
-        axis=1,
-    )
-    b = np.log(Z_sel)
-
-    coeff, *_ = np.linalg.lstsq(A, b, rcond=None)
-    log_amp, cx, cy = coeff
-
-    sigma_x_sq = 1.0 / max(1e-9, -2.0 * cx) if cx < 0 else (patch_radius**2)
-    sigma_y_sq = 1.0 / max(1e-9, -2.0 * cy) if cy < 0 else (patch_radius**2)
-    sigma_x = float(np.sqrt(sigma_x_sq))
-    sigma_y = float(np.sqrt(sigma_y_sq))
-
-    gaussian_surface = np.exp(
-        log_amp
-        - (X_rel**2) / (2.0 * sigma_x_sq)
-        - (Y_rel**2) / (2.0 * sigma_y_sq)
-    )
-
-    return gaussian_surface, sigma_x, sigma_y
-
-
 def plot_correlation_2d(
     heatmap: torch.Tensor,
     softmax_probs: torch.Tensor,
     softmax_mu: tuple[float, float],
     softmax_sigma: tuple[float, float],
     gaussian_mu: tuple[float, float],
-    gaussian_surface: np.ndarray,
-    gaussian_sigma: tuple[float, float],
     resolution: float,
     use_meters: bool,
     peak_offset: tuple[int, int],
     peak_score: float,
     softmax_score: float,
     gaussian_score: float,
-    gaussian_success: bool,
-    gaussian_cov_xy: float = 0.0,
     save_path: Path | None = None,
 ) -> None:
     """
@@ -677,18 +348,13 @@ def plot_correlation_2d(
         unit = "px"
 
     softmax_sigma_x, softmax_sigma_y = softmax_sigma
-    gaussian_sigma_x, gaussian_sigma_y = gaussian_sigma
 
     if use_meters:
         softmax_sigma_x_disp = softmax_sigma_x * resolution
         softmax_sigma_y_disp = softmax_sigma_y * resolution
-        gaussian_sigma_x_disp = gaussian_sigma_x * resolution
-        gaussian_sigma_y_disp = gaussian_sigma_y * resolution
     else:
         softmax_sigma_x_disp = softmax_sigma_x
         softmax_sigma_y_disp = softmax_sigma_y
-        gaussian_sigma_x_disp = gaussian_sigma_x
-        gaussian_sigma_y_disp = gaussian_sigma_y
 
     fig, axes = plt.subplots(1, 3, figsize=(20, 6), constrained_layout=True)
 
@@ -788,83 +454,20 @@ def plot_correlation_2d(
     axes[1].legend(loc="upper right", fontsize=8)
     fig.colorbar(cf1, ax=axes[1], fraction=0.046, pad=0.04, label="log Probability")
 
-    # === Method 3: Gaussian Peak Fitting (Sub-pixel) with Surface Projection ===
-    # Normalize Gaussian surface for better visualization (not log, actual surface)
-    gaussian_normalized = (gaussian_surface - gaussian_surface.min()) / (gaussian_surface.max() - gaussian_surface.min() + 1e-9)
-
-    # Create filled contour plot showing the Gaussian surface
-    cf2 = axes[2].contourf(
-        X_plot,
-        Y_plot,
-        gaussian_normalized,
-        levels=30,
-        cmap="viridis",
-        alpha=0.8,
+    # === Method 3: Gaussian Peak Fitting (Enhanced Sub-pixel) ===
+    axes[2].imshow(
+        heat_np,
+        cmap="coolwarm",
+        origin="lower",
+        extent=[X_plot.min(), X_plot.max(), Y_plot.min(), Y_plot.max()],
     )
-
-    # Add contour lines for additional depth cues
-    contour_lines = axes[2].contour(
-        X_plot,
-        Y_plot,
-        gaussian_normalized,
-        levels=10,
-        colors="white",
-        linewidths=0.5,
-        alpha=0.4,
-    )
-
-    # Draw confidence ellipses (1σ, 2σ, 3σ) based on the fitted Gaussian covariance
-    from matplotlib.patches import Ellipse
 
     gx_plot = gx * resolution if use_meters else gx
     gy_plot = gy * resolution if use_meters else gy
+    peak_x_disp = peak_offset[0] * resolution if use_meters else peak_offset[0]
+    peak_y_disp = peak_offset[1] * resolution if use_meters else peak_offset[1]
 
-    # Create covariance matrix from fitted parameters
-    cov_matrix = np.array([
-        [gaussian_sigma_x**2, gaussian_cov_xy],
-        [gaussian_cov_xy, gaussian_sigma_y**2]
-    ])
-
-    # Compute eigenvalues and eigenvectors for ellipse orientation
-    eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
-
-    # Compute rotation angle from eigenvectors
-    angle_rad = np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0])
-    angle_deg = np.degrees(angle_rad)
-
-    # Ellipse width/height are 2*sqrt(eigenvalue) for each axis
-    ellipse_width_base = 2 * np.sqrt(max(eigenvalues[0], 1e-9))
-    ellipse_height_base = 2 * np.sqrt(max(eigenvalues[1], 1e-9))
-
-    # Draw confidence ellipses at 1σ, 2σ, 3σ
-    confidence_levels = [1, 2, 3]
-    colors_ellipse = ['yellow', 'orange', 'red']
-    alphas_ellipse = [0.7, 0.5, 0.3]
-
-    for level, color, alpha in zip(confidence_levels, colors_ellipse, alphas_ellipse):
-        # Scale by confidence level
-        width = level * ellipse_width_base
-        height = level * ellipse_height_base
-
-        if use_meters:
-            width *= resolution
-            height *= resolution
-
-        ellipse = Ellipse(
-            xy=(gx_plot, gy_plot),
-            width=width,
-            height=height,
-            angle=angle_deg,  # Rotation angle from covariance
-            facecolor="none",
-            edgecolor=color,
-            linewidth=2 if level == 1 else 1.5,
-            linestyle="--" if level > 1 else "-",
-            alpha=alpha,
-            label=f"{level}σ ellipse" if level == 1 else None,
-        )
-        axes[2].add_patch(ellipse)
-
-    # Mark the Gaussian peak
+    # Highlight refined locations
     axes[2].scatter(
         [gx_plot],
         [gy_plot],
@@ -876,23 +479,43 @@ def plot_correlation_2d(
         label=f"Gaussian μ ({gx:+.2f}{unit}, {gy:+.2f}{unit})",
         zorder=10,
     )
-
-    # Show discrete peak for reference
     axes[2].scatter(
-        [peak_offset[0] * resolution if use_meters else peak_offset[0]],
-        [peak_offset[1] * resolution if use_meters else peak_offset[1]],
+        [peak_x_disp],
+        [peak_y_disp],
         c="gold",
-        s=100,
+        s=110,
         marker="*",
         edgecolors="black",
-        linewidths=1.0,
+        linewidths=1.2,
         alpha=0.5,
-        label=f"Discrete Peak",
+        label="Discrete Peak",
+        zorder=9,
+    )
+    axes[2].scatter(
+        [sx * resolution if use_meters else sx],
+        [sy * resolution if use_meters else sy],
+        c="red",
+        marker="^",
+        s=110,
+        edgecolors="white",
+        linewidths=1.2,
+        alpha=0.7,
+        label="Softmax μ",
         zorder=9,
     )
 
+    # Add cross-hairs to emphasise refined alignment
+    axes[2].axvline(gx_plot, color="yellow", linestyle="--", linewidth=1.1, alpha=0.65)
+    axes[2].axhline(gy_plot, color="yellow", linestyle="--", linewidth=1.1, alpha=0.65)
+
+    # Zoom into a local neighbourhood around the refined peak for clarity
+    zoom_radius = 6  # pixels
+    zoom_span = zoom_radius * (resolution if use_meters else 1.0)
+    axes[2].set_xlim(gx_plot - zoom_span, gx_plot + zoom_span)
+    axes[2].set_ylim(gy_plot - zoom_span, gy_plot + zoom_span)
+
     axes[2].set_title(
-        f"Method 3: Gaussian Peak Fitting (3×3 Parabolic)\nScore ≈ {gaussian_score:.4f} (Surface fit σ≈({gaussian_sigma_x_disp:.2f},{gaussian_sigma_y_disp:.2f}) {unit})",
+        f"Method 3: Gaussian Peak Fitting (Refined)\nScore ≈ {gaussian_score:.4f}",
         fontsize=12,
         fontweight="bold",
     )
@@ -901,7 +524,6 @@ def plot_correlation_2d(
     axes[2].grid(True, alpha=0.3, linestyle=":", linewidth=0.5)
     axes[2].legend(loc="upper right", fontsize=8)
     axes[2].set_aspect('equal', adjustable='box')
-    fig.colorbar(cf2, ax=axes[2], fraction=0.046, pad=0.04, label="Normalized Gaussian Surface")
 
     # Overall title
     fig.suptitle(
@@ -969,7 +591,7 @@ def main() -> None:
         type=str,
         default="improved",
         choices=["improved"],
-        help="Gaussian fitting method: improved (multi-stage refinement with Gaussian surface fit).",
+        help="Gaussian fitting method: improved (multi-stage refinement over the correlation peak).",
     )
 
     args = parser.parse_args()
@@ -990,8 +612,6 @@ def main() -> None:
     print("\n[Inference] Computing correlation heatmap...")
     results = compute_embeddings_and_correlation(model, lidar, geospatial)
     heatmap = results["correlation_heatmap"]
-    radius_px = results.get("correlation_radius_px", heatmap.shape[-1] // 2)
-
     # Extract discrete peak info (already centered grid)
     peak_idx = int(torch.argmax(heatmap))
     H, W = heatmap.shape
@@ -1013,13 +633,6 @@ def main() -> None:
 
     # Select Gaussian fitting method based on args
     gaussian_mu_x_px, gaussian_mu_y_px = _gaussian_peak_fit_single_improved(heatmap)
-
-    # For visualization, also compute the full surface fit with larger patch
-    # This is only for showing the Gaussian surface, not for position accuracy
-    fit_patch_radius = max(3, min(radius_px, 6))
-    gaussian_fit = fit_gaussian_surface(heatmap, patch_radius=fit_patch_radius)
-    gaussian_sigma_x_px = gaussian_fit.sigma_x
-    gaussian_sigma_y_px = gaussian_fit.sigma_y
 
     softmax_score = bilinear_sample(heatmap, softmax_mu_x_px, softmax_mu_y_px)
     gaussian_score = bilinear_sample(heatmap, gaussian_mu_x_px, gaussian_mu_y_px)
@@ -1064,8 +677,7 @@ def main() -> None:
         f"({gaussian_mu_x_px * resolution:+.3f}m, {gaussian_mu_y_px * resolution:+.3f}m)\n"
         f"  Distance from GT (0,0): {gaussian_dist_px:.3f}px = {gaussian_dist_m:.4f}m "
         f"[vs Peak:{gaussian_beats_peak} vs Softmax:{gaussian_beats_softmax}]{gaussian_best}\n"
-        f"  Score: {gaussian_score:.4f}\n"
-        f"  (Surface σ for viz: ({gaussian_sigma_x_px:.3f}px, {gaussian_sigma_y_px:.3f}px), cov={gaussian_fit.cov_xy:+.4f})"
+        f"  Score: {gaussian_score:.4f}"
     )
     print("=" * 70)
 
@@ -1076,16 +688,12 @@ def main() -> None:
             (softmax_mu_x_px, softmax_mu_y_px),
             (softmax_sigma_x_px, softmax_sigma_y_px),
             (gaussian_mu_x_px, gaussian_mu_y_px),
-            gaussian_fit.surface,
-            (gaussian_sigma_x_px, gaussian_sigma_y_px),
             resolution,
             use_meters=args.meters,
             peak_offset=(peak_x_offset, peak_y_offset),
             peak_score=peak_score,
             softmax_score=softmax_score,
             gaussian_score=gaussian_score,
-            gaussian_success=gaussian_fit.success,
-            gaussian_cov_xy=gaussian_fit.cov_xy,
             save_path=args.save,
         )
     else:
