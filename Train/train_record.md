@@ -167,6 +167,12 @@ Method2:
        Gaussian RMS (m): 0.135 x, 0.135 y
 
 
+# 3 reoslution data train , each datase show the fillment rate
 # Data fillment rate , bigger range.0.3047re 329x329 ,100mx100m will have lower lidar points fillment than the 150x150 , 30x30 0.2re
 
-# Edge case 000VFSWWAAkobywItdrErpC6fedKDWg4_020
+# Edge case 000VFSWWAAkobywItdrErpC6fedKDWg4_020  05tM3HQakLPqAUqQ7iF7uBoar8V0o8WD_011
+
+# gaussian fit not differentiable , not include into loss only apply infer
+
+# train result softmax.
+# infer result gaussian

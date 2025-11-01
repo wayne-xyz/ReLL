@@ -9,6 +9,7 @@ from torch import Tensor, nn
 
 from .config import ModelConfig
 from .gaussian_peak_refine import gaussian_peak_refine
+from .theta_peak_refine import theta_peak_refine_batch
 
 
 class PyramidEncoder(nn.Module):
@@ -95,12 +96,8 @@ class LocalizationModel(nn.Module):
         nn.init.constant_(self.translation_smoother.weight, 1.0 / (config.translation_smoothing_kernel ** 2))
         self.translation_smoother.weight.requires_grad_(False)
 
-        theta_range = max(int(round(getattr(config, "theta_search_deg", 0))), 0)
-        if theta_range > 0:
-            angles = torch.arange(-theta_range, theta_range + 1, dtype=torch.float32)
-        else:
-            angles = torch.zeros(1, dtype=torch.float32)
-        self.register_buffer("theta_candidates_deg", angles)
+        # Store theta search config (not as buffer - will be created at runtime)
+        self.theta_search_deg = max(int(round(getattr(config, "theta_search_deg", 0))), 0)
 
     def _encode(self, x: Tensor, adapter: nn.Module, encoder: nn.Module) -> Tensor:
         x = adapter(x)
@@ -119,8 +116,19 @@ class LocalizationModel(nn.Module):
         # cost = self.translation_smoother(cost.unsqueeze(1)).squeeze(1)
         return cost
 
-    def compute_theta_logits(self, online: Tensor, geo: Tensor) -> Tensor:
-        angles_deg = self.theta_candidates_deg.to(online.device, dtype=online.dtype)
+    def compute_theta_logits(self, online: Tensor, geo: Tensor, theta_candidates_deg: Tensor) -> Tensor:
+        """
+        Compute rotation similarity scores for given theta candidates.
+
+        Args:
+            online: LiDAR embeddings [B, C, H, W]
+            geo: Map embeddings [B, C, H, W]
+            theta_candidates_deg: Rotation angles to search in degrees [num_angles]
+
+        Returns:
+            Rotation logits [B, num_angles]
+        """
+        angles_deg = theta_candidates_deg.to(online.device, dtype=online.dtype)
         if angles_deg.numel() == 1 and torch.allclose(angles_deg, torch.zeros_like(angles_deg)):
             return (online * geo).sum(dim=(1, 2, 3), keepdim=True)
 
@@ -141,7 +149,24 @@ class LocalizationModel(nn.Module):
             logits.append(sim)
         return torch.stack(logits, dim=1)
 
-    def forward(self, lidar: Tensor, geospatial: Tensor) -> Dict[str, Tensor]:
+    def forward(
+        self,
+        lidar: Tensor,
+        geospatial: Tensor,
+        theta_candidates_deg: Tensor | None = None,
+    ) -> Dict[str, Tensor]:
+        """
+        Forward pass for localization.
+
+        Args:
+            lidar: LiDAR input [B, C_lidar, H, W]
+            geospatial: Map input [B, C_map, H, W]
+            theta_candidates_deg: Optional rotation angles to search [num_angles].
+                                 If None, creates default from config.
+
+        Returns:
+            Dictionary with translation_logits, theta_logits, embeddings
+        """
         lidar_feat = self._encode(lidar, self.lidar_adapter, self.lidar_encoder)
         map_feat = self._encode(geospatial, self.map_adapter, self.map_encoder)
 
@@ -149,11 +174,25 @@ class LocalizationModel(nn.Module):
         map_proj = self._l2norm(self.map_projection(map_feat))
 
         translation_logits = self.compute_translation_logits(lidar_proj, map_proj)
-        theta_logits = self.compute_theta_logits(lidar_proj, map_proj)
+
+        # Create default theta candidates if not provided
+        if theta_candidates_deg is None:
+            theta_range = self.theta_search_deg
+            if theta_range > 0:
+                # Use 0.5° steps for smoother visualization and better precision
+                theta_candidates_deg = torch.arange(
+                    -theta_range, theta_range + 0.5, step=0.5,
+                    dtype=lidar_proj.dtype, device=lidar_proj.device
+                )
+            else:
+                theta_candidates_deg = torch.zeros(1, dtype=lidar_proj.dtype, device=lidar_proj.device)
+
+        theta_logits = self.compute_theta_logits(lidar_proj, map_proj, theta_candidates_deg)
 
         return {
             "translation_logits": translation_logits,
             "theta_logits": theta_logits,
+            "theta_candidates_deg": theta_candidates_deg,  # Return candidates used
             "lidar_embedding": lidar_proj,
             "map_embedding": map_proj,
         }
@@ -172,13 +211,8 @@ class LocalizationCriterion(nn.Module):
         self.w_theta = float(model_config.w_theta)
         self.sigma_weight_xy = float(getattr(model_config, "sigma_weight_xy", 1.0))
         self.sigma_weight_theta = float(getattr(model_config, "sigma_weight_theta", 1.0))
-        theta_range = max(int(round(getattr(model_config, "theta_search_deg", 0))), 0)
-        self.theta_range = theta_range
-        if theta_range > 0:
-            theta_coords = torch.arange(-theta_range, theta_range + 1, dtype=torch.float32)
-        else:
-            theta_coords = torch.zeros(1, dtype=torch.float32)
-        self.register_buffer("theta_coords_deg", theta_coords)
+        # Store theta config (not as buffer - created at runtime)
+        self.theta_search_deg = max(int(round(getattr(model_config, "theta_search_deg", 0))), 0)
         self.sigma_theta_deg = max(float(getattr(model_config, "gaussian_sigma_theta_deg", 1.0)), 1e-6)
         # Store downsampling factor (feature space is downsampled by this factor)
         self.downsampling_factor = downsampling_factor
@@ -303,16 +337,13 @@ class LocalizationCriterion(nn.Module):
         sigma_err_x = torch.abs(sigma_hat_x_m - sigma_target_m).mean()
         sigma_err_y = torch.abs(sigma_hat_y_m - sigma_target_m).mean()
 
-        if self.theta_range > 0:
+        if self.theta_search_deg > 0:
             theta_logits = predictions["theta_logits"].to(device)
-            theta_coords = self.theta_coords_deg.to(device)
-            theta_prob = F.softmax(theta_logits, dim=-1)
-            mu_hat_theta_deg = (theta_prob * theta_coords.view(1, -1)).sum(dim=-1)
+            theta_candidates_deg = predictions["theta_candidates_deg"].to(device)
             mu_theta_gt = pose_mu[:, 2]
 
-            theta_diff = theta_coords.view(1, -1) - mu_hat_theta_deg.view(-1, 1)
-            var_theta = (theta_prob * (theta_diff ** 2)).sum(dim=-1)
-            sigma_hat_theta_deg = torch.sqrt(var_theta.clamp_min(1e-9))
+            # Use the reusable theta peak refinement module
+            mu_hat_theta_deg, sigma_hat_theta_deg = theta_peak_refine_batch(theta_logits, theta_candidates_deg)
             sigma_theta_target = theta_logits.new_full((B,), self.sigma_theta_deg)
 
             loss_theta_mu = torch.abs(mu_hat_theta_deg - mu_theta_gt)

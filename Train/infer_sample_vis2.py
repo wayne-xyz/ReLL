@@ -39,7 +39,8 @@ if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from Train.gaussian_peak_refine import GaussianPeakResult, bilinear_sample, gaussian_peak_refine
-from Train.infer_visualize import (  # noqa: E402
+from Train.theta_peak_refine import ThetaPeakResult, theta_peak_refine
+from Train.infer_sample_vis import (  # noqa: E402
     compute_embeddings_and_correlation,
     load_checkpoint,
     load_sample,
@@ -60,6 +61,10 @@ def plot_correlation_2d(
     peak_score: float,
     softmax_score: float,
     gaussian_score: float,
+    theta_result: ThetaPeakResult | None = None,
+    theta_candidates_deg: torch.Tensor | None = None,
+    theta_logits: torch.Tensor | None = None,
+    theta_gt_deg: float | None = None,
     save_path: Path | None = None,
 ) -> None:
     """
@@ -67,6 +72,8 @@ def plot_correlation_2d(
     1. Heatmap cross-correlation (discrete peak)
     2. Softmax refinement (expectation-based)
     3. Gaussian peak fitting (sub-pixel fitting)
+
+    Plus optional theta (rotation) response curve visualization.
     """
     heat_np = heatmap.cpu().numpy()
     softmax_np = softmax_probs.cpu().numpy()
@@ -96,7 +103,15 @@ def plot_correlation_2d(
         softmax_sigma_x_disp = softmax_sigma_x
         softmax_sigma_y_disp = softmax_sigma_y
 
-    fig, axes = plt.subplots(1, 3, figsize=(20, 6), constrained_layout=True)
+    # Determine layout: add theta row if theta data is provided
+    has_theta = theta_result is not None and theta_candidates_deg is not None and theta_logits is not None
+    if has_theta:
+        fig = plt.figure(figsize=(20, 11), constrained_layout=True)
+        gs = fig.add_gridspec(2, 3, height_ratios=[2, 1])
+        axes = [fig.add_subplot(gs[0, i]) for i in range(3)]
+        ax_theta = fig.add_subplot(gs[1, :])  # Theta spans full width
+    else:
+        fig, axes = plt.subplots(1, 3, figsize=(20, 6), constrained_layout=True)
 
     # === Method 1: Raw Heatmap Cross-Correlation (Discrete Peak) ===
     im0 = axes[0].imshow(
@@ -265,12 +280,103 @@ def plot_correlation_2d(
     axes[2].legend(loc="upper right", fontsize=8)
     axes[2].set_aspect('equal', adjustable='box')
 
+    # === Theta (Rotation) Response Curve (if provided) ===
+    if has_theta:
+        theta_angles = theta_candidates_deg.cpu().numpy()
+        theta_scores = theta_logits.cpu().numpy()
+        theta_probs = theta_result.prob_distribution.numpy()
+
+        # Plot raw logits
+        ax_theta.plot(
+            theta_angles,
+            theta_scores,
+            'b-',
+            linewidth=2.0,
+            label='Raw Logits',
+            alpha=0.7,
+        )
+
+        # Plot softmax probabilities on secondary y-axis
+        ax_theta_prob = ax_theta.twinx()
+        ax_theta_prob.fill_between(
+            theta_angles,
+            theta_probs,
+            alpha=0.3,
+            color='green',
+            label='Softmax Probability',
+        )
+        ax_theta_prob.plot(
+            theta_angles,
+            theta_probs,
+            'g-',
+            linewidth=1.5,
+            alpha=0.8,
+        )
+
+        # Mark predicted theta
+        ax_theta.axvline(
+            theta_result.theta_deg,
+            color='blue',
+            linestyle='--',
+            linewidth=2.5,
+            label=f'Predicted θ = {theta_result.theta_deg:.2f}°',
+        )
+
+        # Mark ground truth theta if provided
+        if theta_gt_deg is not None:
+            ax_theta.axvline(
+                theta_gt_deg,
+                color='red',
+                linestyle='--',
+                linewidth=2.5,
+                label=f'Ground Truth θ = {theta_gt_deg:.2f}°',
+            )
+            # Show error
+            theta_error = abs(theta_result.theta_deg - theta_gt_deg)
+            error_text = f'Error = {theta_error:.3f}°'
+        else:
+            error_text = ''
+
+        # Mark uncertainty region
+        sigma = theta_result.sigma_deg
+        ax_theta.axvspan(
+            theta_result.theta_deg - sigma,
+            theta_result.theta_deg + sigma,
+            alpha=0.2,
+            color='blue',
+            label=f'±1σ = ±{sigma:.2f}°',
+        )
+
+        ax_theta.set_xlabel('Rotation Angle (degrees)', fontsize=11, fontweight='bold')
+        ax_theta.set_ylabel('Correlation Score (Logits)', fontsize=11, fontweight='bold', color='blue')
+        ax_theta_prob.set_ylabel('Softmax Probability', fontsize=11, fontweight='bold', color='green')
+        ax_theta.tick_params(axis='y', labelcolor='blue')
+        ax_theta_prob.tick_params(axis='y', labelcolor='green')
+
+        # Title with stats
+        title_parts = [f'Theta (Rotation) Response Curve']
+        if theta_gt_deg is not None:
+            title_parts.append(error_text)
+        title_parts.append(f'Confidence = {theta_result.confidence:.3f}')
+        ax_theta.set_title(' | '.join(title_parts), fontsize=12, fontweight='bold')
+
+        # Combine legends from both y-axes
+        lines1, labels1 = ax_theta.get_legend_handles_labels()
+        lines2, labels2 = ax_theta_prob.get_legend_handles_labels()
+        ax_theta.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=9)
+
+        ax_theta.grid(True, alpha=0.3, linestyle=':', linewidth=0.5)
+        ax_theta.set_xlim(theta_angles.min() - 0.5, theta_angles.max() + 0.5)
+
     # Overall title
+    title = "Three Position-Finding Methods Comparison (2D Mode)"
+    if has_theta:
+        title += " + Rotation Analysis"
     fig.suptitle(
-        "Three Position-Finding Methods Comparison (2D Mode)",
+        title,
         fontsize=14,
         fontweight="bold",
-        y=1.02,
+        y=0.995 if has_theta else 1.02,
     )
 
     if save_path is not None:
@@ -363,6 +469,24 @@ def main() -> None:
     peak_x_offset = peak_col - center_col
     peak_score = float(heatmap[peak_row, peak_col].item())
 
+    # Get theta (rotation) predictions by running full model forward pass
+    print("\n[Inference] Computing rotation predictions...")
+    lidar_batch = lidar.unsqueeze(0)  # Add batch dimension
+    geospatial_batch = geospatial.unsqueeze(0)
+    with torch.no_grad():
+        predictions = model(lidar_batch, geospatial_batch)
+
+    theta_logits = predictions["theta_logits"].squeeze(0).cpu()  # Remove batch dim
+    theta_candidates_deg = predictions["theta_candidates_deg"].cpu()  # Get from predictions, not model buffer
+
+    # Apply theta peak refinement
+    theta_result = theta_peak_refine(theta_logits, theta_candidates_deg)
+
+    print(f"  - Theta candidates: {theta_candidates_deg.numpy()}")
+    print(f"  - Predicted theta: {theta_result.theta_deg:.3f}°")
+    print(f"  - Theta uncertainty (σ): {theta_result.sigma_deg:.3f}°")
+    print(f"  - Theta confidence: {theta_result.confidence:.3f}")
+
     (
         softmax_probs,
         softmax_mu_x_px,
@@ -421,6 +545,14 @@ def main() -> None:
         f"[vs Peak:{gaussian_beats_peak} vs Softmax:{gaussian_beats_softmax}]{gaussian_best}\n"
         f"  Score: {gaussian_score:.4f}"
     )
+    print(
+        f"\n[Theta (Rotation) Prediction]\n"
+        f"  Predicted θ: {theta_result.theta_deg:+.3f}°\n"
+        f"  Uncertainty (σ): {theta_result.sigma_deg:.3f}°\n"
+        f"  Confidence: {theta_result.confidence:.3f} (max softmax probability)\n"
+        f"  Search range: [{theta_candidates_deg.min():.0f}°, {theta_candidates_deg.max():.0f}°] "
+        f"({len(theta_candidates_deg)} candidates)"
+    )
     print("=" * 70)
 
     if args.vis:
@@ -436,6 +568,10 @@ def main() -> None:
             peak_score=peak_score,
             softmax_score=softmax_score,
             gaussian_score=gaussian_score,
+            theta_result=theta_result,
+            theta_candidates_deg=theta_candidates_deg,
+            theta_logits=theta_logits,
+            theta_gt_deg=0.0,  # Ground truth is 0 for centered samples
             save_path=args.save,
         )
     else:

@@ -67,7 +67,17 @@ def load_checkpoint(ckpt_path: Path, device: str = "cpu") -> Tuple[LocalizationM
 
     # Reconstruct model (state dict key is "model_state" not "model_state_dict")
     model = LocalizationModel(model_cfg)
-    model.load_state_dict(checkpoint["model_state"])
+
+    # Load state dict (theta_candidates_deg is no longer a buffer, so old checkpoints are fine)
+    state_dict = checkpoint["model_state"]
+
+    # Remove old theta buffers if they exist (migration from old checkpoints)
+    if "theta_candidates_deg" in state_dict:
+        old_theta = state_dict.pop("theta_candidates_deg")
+        print(f"[Migration] Removed old theta buffer from checkpoint (had {old_theta.shape[0]} candidates)")
+        print(f"  Model will create theta candidates dynamically at runtime")
+
+    model.load_state_dict(state_dict, strict=False)
     model.to(device)
     model.eval()
 

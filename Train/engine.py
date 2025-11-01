@@ -283,7 +283,13 @@ def load_localization_model(
     optim_cfg: OptimConfig = checkpoint["optim_cfg"]
 
     model = LocalizationModel(model_cfg)
-    model.load_state_dict(checkpoint["model_state"])
+
+    # Remove old theta buffer if it exists (migration from old checkpoints)
+    state_dict = checkpoint["model_state"]
+    if "theta_candidates_deg" in state_dict:
+        state_dict.pop("theta_candidates_deg")
+
+    model.load_state_dict(state_dict, strict=False)
     model.to(device or optim_cfg.device)
 
     optimizer = None
