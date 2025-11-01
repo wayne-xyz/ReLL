@@ -6,12 +6,7 @@ Batch position refinement comparison across entire dataset.
 Scans all samples in a dataset folder and compares three position-finding methods:
 1. Discrete heatmap peak (argmax)
 2. Softmax expectation refinement (probabilistic weighting)
-3. Gaussian surface fit refinement (least-squares fitting over patch)
-
-The Gaussian method uses fit_gaussian_peak() from correlation_3d_visualizer.py,
-which fits log(Z) = a + bx*X + by*Y - cx*X^2 - cy*Y^2 over a patch around the
-discrete peak to simultaneously find both the refined peak position (μx, μy) and
-Gaussian shape parameters (σx, σy).
+3. Gaussian peak refinement (multi-stage sub-pixel estimator)
 
 Plots sparse scatter showing prediction errors (distance from ground truth center).
 """
@@ -37,7 +32,7 @@ from Train.infer_visualize import (  # noqa: E402
     _softmax_refinement,
 )
 
-from Train.correlation_3d_visualizer import fit_gaussian_peak  # noqa: E402
+from Train.gaussian_peak_refine import gaussian_peak_refine  # noqa: E402
 
 
 def find_all_samples(dataset_folder: Path) -> List[Path]:
@@ -121,14 +116,10 @@ def process_single_sample(
         softmax_x_m = softmax_mu_x_px * resolution
         softmax_y_m = softmax_mu_y_px * resolution
 
-        # Method 3: Gaussian surface fit (using least-squares over larger patch)
-        radius_px = results.get("correlation_radius_px", heatmap.shape[-1] // 2)
-        patch_radius = max(3, min(radius_px, 6))
-        gaussian_mu_x_px, gaussian_mu_y_px, gaussian_sigma_x_px, gaussian_sigma_y_px = fit_gaussian_peak(
-            heatmap, patch_radius=patch_radius
-        )
-        gaussian_x_m = gaussian_mu_x_px * resolution
-        gaussian_y_m = gaussian_mu_y_px * resolution
+        # Method 3: Gaussian peak refinement (multi-stage)
+        gaussian_result = gaussian_peak_refine(heatmap)
+        gaussian_x_m = gaussian_result.x * resolution
+        gaussian_y_m = gaussian_result.y * resolution
 
         return {
             'peak': (float(peak_x_m), float(peak_y_m)),
@@ -363,7 +354,7 @@ def main() -> None:
 
     compute_statistics(peak_positions, "Discrete Peak")
     compute_statistics(softmax_positions, "Softmax Refinement")
-    compute_statistics(gaussian_positions, "Gaussian Surface Fit (Least-Squares)")
+    compute_statistics(gaussian_positions, "Gaussian Peak Refinement")
 
     # Plot comparison
     print("\n[Plot] Generating comparison plot...")

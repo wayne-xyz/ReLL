@@ -27,6 +27,7 @@ if __name__ == "__main__":
 from Train.config import DatasetConfig, ModelConfig, OptimConfig, SaveConfig, EarlyStopConfig
 from Train.data import raster_builder_from_processed_dir, replace_nan_with_zero
 from Train.model import LocalizationModel
+from Train.gaussian_peak_refine import gaussian_peak_refine
 
 
 def load_checkpoint(ckpt_path: Path, device: str = "cpu") -> Tuple[LocalizationModel, ModelConfig]:
@@ -222,47 +223,6 @@ def _softmax_refinement(
     return probs.cpu(), float(mu_x.item()), float(mu_y.item()), sigma_x, sigma_y
 
 
-def _gaussian_peak_fit_single(heatmap: Tensor) -> Tuple[float, float]:
-    """Apply Gaussian peak fitting (matching training-time refinement) on a heatmap."""
-    H, W = heatmap.shape
-    peak_idx = int(torch.argmax(heatmap.view(-1)))
-    row = peak_idx // W
-    col = peak_idx % W
-
-    row_start = max(0, row - 1)
-    row_end = min(H, row + 2)
-    col_start = max(0, col - 1)
-    col_end = min(W, col + 2)
-    neighborhood = heatmap[row_start:row_end, col_start:col_end]
-
-    if neighborhood.shape != (3, 3):
-        return float(col - W // 2), float(row - H // 2)
-
-    log_neighborhood = torch.log(neighborhood.clamp(min=1e-10))
-    c_00 = float(log_neighborhood[1, 1].item())
-    c_m10 = float(log_neighborhood[1, 0].item())
-    c_p10 = float(log_neighborhood[1, 2].item())
-    c_0m1 = float(log_neighborhood[0, 1].item())
-    c_0p1 = float(log_neighborhood[2, 1].item())
-
-    d2_dx2 = c_m10 - 2.0 * c_00 + c_p10
-    d2_dy2 = c_0m1 - 2.0 * c_00 + c_0p1
-    d_dx = (c_p10 - c_m10) * 0.5
-    d_dy = (c_0p1 - c_0m1) * 0.5
-
-    dx = 0.0
-    dy = 0.0
-    if d2_dx2 < -1e-6:
-        dx = max(-1.0, min(1.0, -d_dx / d2_dx2))
-    if d2_dy2 < -1e-6:
-        dy = max(-1.0, min(1.0, -d_dy / d2_dy2))
-
-    refined_x = (col - W // 2) + dx
-    refined_y = (row - H // 2) + dy
-
-    return float(refined_x), float(refined_y)
-
-
 def _compute_translation_logits_with_radius(
     lidar_proj: Tensor,
     map_proj: Tensor,
@@ -405,7 +365,9 @@ def visualize_results(
     offset_x_m = offset_x_px * resolution
 
     probs, softmax_mu_x_px, softmax_mu_y_px, softmax_sigma_x_px, softmax_sigma_y_px = _softmax_refinement(heatmap)
-    gaussian_mu_x_px, gaussian_mu_y_px = _gaussian_peak_fit_single(heatmap)
+    gaussian_result = gaussian_peak_refine(heatmap)
+    gaussian_mu_x_px = gaussian_result.x
+    gaussian_mu_y_px = gaussian_result.y
 
     softmax_offset_x_m = softmax_mu_x_px * resolution
     softmax_offset_y_m = softmax_mu_y_px * resolution
