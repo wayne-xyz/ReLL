@@ -162,7 +162,7 @@ class LocalizationModel(nn.Module):
             lidar: LiDAR input [B, C_lidar, H, W]
             geospatial: Map input [B, C_map, H, W]
             theta_candidates_deg: Optional rotation angles to search [num_angles].
-                                 If None, creates default from config.
+                                 If None, creates default: ±5° with 0.1° steps (101 candidates)
 
         Returns:
             Dictionary with translation_logits, theta_logits, embeddings
@@ -179,9 +179,10 @@ class LocalizationModel(nn.Module):
         if theta_candidates_deg is None:
             theta_range = self.theta_search_deg
             if theta_range > 0:
-                # Use 0.5° steps for smoother visualization and better precision
+                # Use 0.1° steps for finer resolution and better softmax expectation
+                # Range: ±5° with 0.1° steps = 101 candidates (vs 21 with 0.5° steps)
                 theta_candidates_deg = torch.arange(
-                    -theta_range, theta_range + 0.5, step=0.5,
+                    -theta_range, theta_range + 0.1, step=0.1,
                     dtype=lidar_proj.dtype, device=lidar_proj.device
                 )
             else:

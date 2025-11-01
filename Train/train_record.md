@@ -176,3 +176,17 @@ Method2:
 
 # train result softmax.
 # infer result gaussian
+
+
+# 0.3047
+# Epoch 181/200: train_loss=1.6816  | val_loss=1.6163  | train_rms_theta=0.7543 deg  | val_rms_theta=0.7083 deg
+         Pixel RMS (m):      train=(0.573 x, 0.516 y)  | val=(0.520 x, 0.456 y)
+         Softmax RMS (m):    train=(0.523 x, 0.456 y)  | val=(0.485 x, 0.404 y)
+         Gaussian RMS (m):   train=(0.529 x, 0.468 y)  | val=(0.483 x, 0.423 y)
+
+# 0.2 
+[Best] Saved model from epoch 93: val_loss=0.6851
+       Theta RMS (deg):     train=0.5219  | val=0.4480
+       Pixel RMS (m):      0.129 x, 0.136 y
+       Softmax RMS (m):    0.101 x, 0.109 y
+       Gaussian RMS (m):   0.104 x, 0.119 y
