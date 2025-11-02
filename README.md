@@ -1,3 +1,6 @@
+<img width="2346" height="990" alt="Banner" src="https://github.com/user-attachments/assets/72ea4786-0930-4ece-82a0-18c8cbbf9ec0" />
+
+
 # ReLL: Reproduce Learned Localization with GICP Registration of Lidar&DSM
 
 ## Overview
@@ -91,9 +94,10 @@ The pipeline follows this sequence:
 
 GICP alignment improves LiDAR-to-DSM registration:
 
-![GICP alignment example](https://rongweiji.github.io/img/GICP%20align%20comapre.png)
 
+<img width="1312" height="1707" alt="alignment gicp result " src="https://github.com/user-attachments/assets/2bbb5a2f-476f-4595-b293-407181c886ff" />
 ## Repository Structure
+
 
 ### Core Training & Inference
 
