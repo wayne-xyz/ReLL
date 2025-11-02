@@ -408,8 +408,216 @@ Verification steps
 - Check histograms of stored height-channel values to ensure they fall in the expected range and that the vertical shift was applied.
 - Confirm metadata keys (resolution, vertical_shift, tile_origin) are present for each tile.
 
+### Training Data Format (Post-Rasterization)
 
-**Next Steps:**
-- See `Data_pipeline/README.md` for processing pipeline
-- See `Data-pipeline-fetch/README.md` for downloading and processing automation
-- See `GICP_intro.md` for point cloud alignment workflows
+After `Data-pipeline-fetch/raster.py` processes the raw data, each training sample is stored as a **directory** containing multiple `.npy` files and metadata. These processed samples are used directly by the training pipeline in `Train/data.py`.
+
+#### Sample Directory Structure
+
+Each training sample directory contains:
+
+```
+{sample_id}/
+├── gicp_height.npy              # GICP-aligned LiDAR height raster
+├── gicp_intensity.npy           # GICP-aligned LiDAR intensity raster
+├── non_aligned_height.npy       # Non-aligned (raw) LiDAR height raster
+├── non_aligned_intensity.npy    # Non-aligned (raw) LiDAR intensity raster
+├── dsm_height.npy               # Digital Surface Model height raster
+├── imagery.npy                  # RGB or multispectral imagery
+├── resolution.pkl               # Raster resolution (meters/pixel)
+├── transform.pkl                # Rasterio Affine transform (pixel↔world coords)
+├── profile.pkl                  # (Optional) Rasterio profile metadata
+└── metadata.pkl                 # (Optional) Additional sample metadata
+```
+
+#### Raster Array Specifications
+
+**LiDAR Rasters** (`gicp_height.npy`, `non_aligned_height.npy`):
+- **Shape**: `(H, W)` - 2D height map
+- **Dtype**: `float32`
+- **Units**: Meters (elevation)
+- **Missing data**: `NaN` for pixels with no LiDAR returns
+- **Projection**: Already rasterized at specified resolution (default: 0.2 m/px)
+
+**LiDAR Intensity** (`gicp_intensity.npy`, `non_aligned_intensity.npy`):
+- **Shape**: `(H, W)` - 2D intensity map
+- **Dtype**: `float32`
+- **Range**: Typically 0-255 (reflectance values)
+- **Missing data**: `NaN` for pixels with no LiDAR returns
+
+**DSM Height** (`dsm_height.npy`):
+- **Shape**: `(H, W)` - 2D Digital Surface Model
+- **Dtype**: `float32`
+- **Units**: Meters (elevation)
+- **Source**: Reference elevation data (e.g., from imagery/photogrammetry)
+- **Missing data**: `NaN` for unavailable regions
+
+**Imagery** (`imagery.npy`):
+- **Shape**: `(H, W, C)` or `(C, H, W)` - RGB or multispectral
+- **Channels**: Typically 3 (RGB), can be more for multispectral
+- **Dtype**: `uint8` (0-255) or `float32` (normalized)
+- **Order**: HWC (Height-Width-Channel) or CHW (Channel-Height-Width)
+- **Note**: Training code automatically converts HWC→CHW if needed
+
+#### Metadata Files
+
+**resolution.pkl**:
+- **Type**: `float`
+- **Value**: Spatial resolution in meters per pixel (e.g., `0.2`)
+- **Usage**: Scale factor for geometric operations
+
+**transform.pkl**:
+- **Type**: `rasterio.Affine`
+- **Purpose**: Maps pixel coordinates to world coordinates (UTM/city frame)
+- **Example**:
+  ```python
+  Affine(0.2, 0.0, 500000.0,
+         0.0, -0.2, 4000000.0)
+  # Translation(x_min, y_max) * Scale(res, -res)
+  ```
+
+#### Training Data Loading Pipeline
+
+The training pipeline (`Train/data.py`) processes these files as follows:
+
+**1. Load rasters from sample directory:**
+```python
+rasters = raster_builder_from_processed_dir(sample_dir)
+# Returns dict with keys: gicp_height, gicp_intensity, non_aligned_height,
+#                         non_aligned_intensity, dsm_height, imagery, resolution
+```
+
+**2. Select LiDAR variant** (GICP or non-aligned):
+```python
+if lidar_variant == "gicp":
+    lidar_height = rasters["gicp_height"]
+    lidar_intensity = rasters["gicp_intensity"]
+else:  # non_aligned
+    lidar_height = rasters["non_aligned_height"]
+    lidar_intensity = rasters["non_aligned_intensity"]
+```
+
+**3. Fill NaN gaps and create validity masks:**
+```python
+def replace_nan_with_zero(tensor):
+    mask = torch.isfinite(tensor)
+    cleaned = torch.where(mask, tensor, torch.zeros_like(tensor))
+    return cleaned, mask.float()
+
+lidar_height, lidar_mask = replace_nan_with_zero(lidar_height)
+lidar_intensity, _ = replace_nan_with_zero(lidar_intensity)
+dsm_height, dsm_mask = replace_nan_with_zero(dsm_height)
+```
+
+**Key point**: Missing pixels (NaN) are filled with **zeros**, and a binary mask channel tracks which pixels had valid data.
+
+**4. Construct multi-channel tensors:**
+
+**LiDAR Tensor** (3 channels):
+```python
+lidar_tensor = torch.stack([
+    lidar_height,              # Channel 0: Height (meters, NaN→0)
+    lidar_intensity / 255.0,   # Channel 1: Intensity (normalized 0-1)
+    lidar_mask,                # Channel 2: Validity mask (1=valid, 0=empty)
+], dim=0)
+# Shape: (3, H, W)
+```
+
+**Map Tensor** (5 channels):
+```python
+map_tensor = torch.cat([
+    imagery[:3] / 255.0,  # Channels 0-2: RGB (normalized 0-1)
+    dsm_height.unsqueeze(0),    # Channel 3: DSM height (meters, NaN→0)
+    dsm_mask.unsqueeze(0),      # Channel 4: DSM validity mask
+], dim=0)
+# Shape: (5, H, W)
+```
+
+**5. Apply augmentation** (rotation + translation):
+```python
+# Random geometric augmentation
+warped_lidar = affine_warp(lidar_tensor, angle_deg=dtheta, translate_px=(dx, dy))
+
+# Target pose offset (what the model should predict)
+target_mu = torch.tensor([-dx_m, -dy_m, -dtheta_deg], dtype=torch.float32)
+```
+
+#### Training Batch Format
+
+Each training batch contains:
+
+```python
+{
+    "lidar": Tensor,        # Shape: (B, 3, H, W) - Warped LiDAR with mask
+    "map": Tensor,          # Shape: (B, 5, H, W) - RGB + DSM + mask
+    "pose_mu": Tensor,      # Shape: (B, 3) - Target [dx_m, dy_m, dtheta_deg]
+    "resolution": Tensor,   # Shape: (B,) - Meters per pixel
+    "sample_idx": Tensor,   # Shape: (B,) - Sample index in dataset
+}
+```
+
+#### Gap Filling Strategy
+
+**Why fill with zeros instead of interpolation?**
+1. **Explicit missing data tracking**: The mask channel (channel 2 for LiDAR, channel 4 for DSM) explicitly tells the model which pixels are valid vs. filled.
+2. **No hallucination**: Zero-filling doesn't create fake height values — the model learns to recognize zero+mask=0 as "no data here."
+3. **Computational efficiency**: Simple, deterministic, no expensive interpolation.
+4. **Training stability**: Consistent behavior across samples.
+
+**Alternative method (data pipeline visualization)**:
+- For **visualization** purposes (not training), `Data-pipeline-fetch/raster.py` uses a shifted baseline:
+  ```python
+  shift = np.percentile(finite_values, 0.5)  # 0.5th percentile
+  shifted = height - shift
+  shifted = np.maximum(shifted, 0.0)  # Clamp to ≥0
+  ```
+- This makes visualizations easier to interpret but is **NOT** used during training.
+
+#### Viewing Training Samples
+
+Two utilities are provided for visualizing processed samples:
+
+**1. `utilities/viewer_raster.py`** - View all channels in a sample:
+```bash
+python utilities/viewer_raster.py PATH/TO/SAMPLE_FOLDER
+```
+Shows: DSM, GICP height/intensity, RGB imagery, non-aligned height/intensity, plus original vs. shifted histograms.
+
+**2. `utilities/projection_compare.py`** - Compare processing methods:
+```bash
+python utilities/projection_compare.py PATH/TO/FILE.parquet --crop --crop-size 30.0
+```
+Compares gap-filled (training method) vs. shifted+filled (visualization method) side-by-side with distributions.
+
+#### Summary: From Raw Data to Training Tensors
+
+```
+Raw Argoverse 2 LiDAR (.feather)
+    ↓ [Data-pipeline-fetch/raster.py]
+    ↓ • Transform to city/UTM frame
+    ↓ • Rasterize to 2D grid (0.2 m/px)
+    ↓ • Save as .npy arrays
+    ↓
+Sample directory (gicp_height.npy, imagery.npy, etc.)
+    ↓ [Train/data.py: raster_builder_from_processed_dir()]
+    ↓ • Load .npy arrays
+    ↓ • Fill NaN → 0 and create masks
+    ↓
+Multi-channel tensors
+    ↓ • LiDAR: [height, intensity/255, mask] - 3 channels
+    ↓ • Map: [R, G, B, dsm_height, dsm_mask] - 5 channels
+    ↓ [Train/data.py: __getitem__()]
+    ↓ • Apply random rotation/translation to LiDAR
+    ↓ • Compute target pose offset
+    ↓
+Training batch ready for model
+```
+
+This pipeline ensures:
+- ✅ Consistent spatial resolution across all modalities
+- ✅ Aligned coordinate frames (all data in same grid)
+- ✅ Explicit missing data handling (masks + zero-fill)
+- ✅ Geometric augmentation for robust training
+- ✅ Metadata preservation (resolution, transform) for inference
+
+

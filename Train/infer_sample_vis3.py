@@ -29,6 +29,7 @@ import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib import cm
 import numpy as np
 import torch
 
@@ -60,6 +61,7 @@ def plot_correlation_2d(
     softmax_score: float,
     gaussian_score: float,
     imagery: np.ndarray | None = None,
+    lidar_image: np.ndarray | None = None,
     save_path: Path | None = None,
     show_all: bool = False,
 ) -> None:
@@ -79,6 +81,7 @@ def plot_correlation_2d(
         softmax_score: Correlation score at softmax position
         gaussian_score: Correlation score at Gaussian position
         imagery: Optional RGB imagery [3, H, W] for overlay
+        lidar_image: Optional LiDAR raster to display alongside imagery overlays
         save_path: Optional path to save figure
         show_all: If True, show top row (method plots); else show only imagery overlays
     """
@@ -114,17 +117,118 @@ def plot_correlation_2d(
     sx, sy = softmax_mu
     gx, gy = gaussian_mu
 
-    # Create layout based on show_all flag
+    lidar_height_display: np.ndarray | np.ma.MaskedArray | None = None
+    lidar_intensity_display: np.ndarray | np.ma.MaskedArray | None = None
+    lidar_hw: tuple[int, int] | None = None
+    total_valid_pixels = 0
+    mask_valid_count: int | None = None
+    valid_counts: dict[str, int] = {}
+
+    if lidar_image is not None:
+        lidar_np = np.array(lidar_image)
+        if lidar_np.ndim > 0:
+            lidar_np = np.squeeze(lidar_np)
+        if lidar_np.ndim == 3 and lidar_np.shape[0] <= 4 and lidar_np.shape[1] > 4:
+            lidar_np = np.transpose(lidar_np, (1, 2, 0))
+        if lidar_np.ndim == 2:
+            lidar_np = lidar_np[:, :, None]
+
+        lidar_np = lidar_np.astype(np.float32, copy=False)
+
+        total_valid_pixels = lidar_np.shape[0] * lidar_np.shape[1]
+
+        def _normalize_channel(channel: np.ndarray) -> np.ndarray:
+            channel = np.array(channel, dtype=np.float32, copy=False)
+            finite_mask_local = np.isfinite(channel)
+            if np.any(finite_mask_local):
+                min_val_local = float(channel[finite_mask_local].min())
+                max_val_local = float(channel[finite_mask_local].max())
+                if max_val_local > min_val_local:
+                    channel = (channel - min_val_local) / (max_val_local - min_val_local)
+                else:
+                    channel = np.zeros_like(channel)
+            else:
+                channel = np.zeros_like(channel)
+            channel[~finite_mask_local] = 0.0
+            return channel
+
+        channels = lidar_np.shape[2] if lidar_np.ndim == 3 else 1
+        height_ch = lidar_np[..., 0] if channels >= 1 else None
+        intensity_ch = lidar_np[..., 1] if channels >= 2 else None
+        mask_ch = lidar_np[..., 2] if channels >= 3 else None
+
+        mask_array: np.ndarray | None = None
+        if mask_ch is not None:
+            mask_array = np.array(mask_ch >= 0.5, dtype=bool)
+            mask_valid_count = int(mask_array.sum())
+
+        if height_ch is not None:
+            valid_counts["height"] = int(np.isfinite(height_ch).sum())
+            height_norm = _normalize_channel(height_ch)
+            if mask_array is not None:
+                lidar_height_display = np.ma.array(height_norm, mask=~mask_array)
+            else:
+                lidar_height_display = height_norm
+        if intensity_ch is not None:
+            valid_counts["intensity"] = int(np.isfinite(intensity_ch).sum())
+            intensity_norm = _normalize_channel(intensity_ch)
+            if mask_array is not None:
+                lidar_intensity_display = np.ma.array(intensity_norm, mask=~mask_array)
+            else:
+                lidar_intensity_display = intensity_norm
+
+        if lidar_height_display is not None:
+            lidar_hw = lidar_height_display.shape
+        elif lidar_intensity_display is not None:
+            lidar_hw = lidar_intensity_display.shape
+        elif mask_array is not None:
+            lidar_hw = mask_array.shape
+
+    num_method_cols = 3
+    num_lidar_cols = int(lidar_height_display is not None) + int(lidar_intensity_display is not None)
+    lidar_enabled = num_lidar_cols > 0
+    max_cols = max(num_method_cols, num_lidar_cols if lidar_enabled else 1)
+
     if show_all:
-        # 2×3 layout: top row = 3 methods, bottom row = 3 imagery overlays
-        fig, axes = plt.subplots(2, 3, figsize=(24, 14), constrained_layout=True)
-        axes_top = axes[0]  # Top row: method visualizations
-        axes_bottom = axes[1]  # Bottom row: imagery overlays
+        rows = 3 if lidar_enabled else 2
     else:
-        # 1×3 layout: only show imagery overlays
-        fig, axes = plt.subplots(1, 3, figsize=(24, 7), constrained_layout=True)
-        axes_top = None  # No top row
-        axes_bottom = axes  # Bottom row is the only row
+        rows = 2 if lidar_enabled else 1
+
+    figsize_width = max(24, 8 * max_cols)
+    figsize_height = max(7 * rows, 14 if show_all else 7 * rows)
+    fig, axes_grid = plt.subplots(rows, max_cols, figsize=(figsize_width, figsize_height), constrained_layout=True)
+    axes_grid = np.atleast_2d(axes_grid)
+
+    axes_top: np.ndarray | None
+    lidar_row_index: int | None = None
+    if show_all:
+        top_row = np.atleast_1d(axes_grid[0])
+        axes_top = top_row[:num_method_cols]
+        for extra_ax in top_row[num_method_cols:]:
+            extra_ax.axis("off")
+        if lidar_enabled:
+            lidar_row_index = 1
+            imagery_row_index = 2
+        else:
+            imagery_row_index = 1
+    else:
+        axes_top = None
+        imagery_row_index = 0
+        if lidar_enabled:
+            lidar_row_index = 1
+
+    imagery_row = np.atleast_1d(axes_grid[imagery_row_index])
+    axes_bottom = imagery_row[:num_method_cols]
+    for extra_ax in imagery_row[num_method_cols:]:
+        extra_ax.axis("off")
+
+    lidar_axes: list[plt.Axes] = []
+    if lidar_enabled and lidar_row_index is not None:
+        lidar_row = np.atleast_1d(axes_grid[lidar_row_index])
+        lidar_axes = list(lidar_row[:num_lidar_cols])
+        for extra_ax in lidar_row[num_lidar_cols:]:
+            extra_ax.axis("off")
+    lidar_extent: list[float] | None = None
 
     # === Top Row: Method Visualizations (only if show_all=True) ===
     if axes_top is not None:
@@ -299,8 +403,6 @@ def plot_correlation_2d(
             img_display = img_display / 255.0
 
         # Prepare different overlays for each method
-        from matplotlib import cm
-
         # 1. Raw heatmap overlay (for Method 1)
         # Mask out low correlation values (similar to softmax)
         threshold_heat = heat_np.max() * 0.001  # Show only values > 0.1% of max
@@ -331,6 +433,15 @@ def plot_correlation_2d(
             imagery_extent = [0, img_W * resolution, 0, img_H * resolution]
         else:
             imagery_extent = [0, img_W, 0, img_H]
+
+        if lidar_hw is not None:
+            if lidar_hw == img_display.shape[:2]:
+                lidar_extent = list(imagery_extent)
+            else:
+                if use_meters:
+                    lidar_extent = [0, lidar_hw[1] * resolution, 0, lidar_hw[0] * resolution]
+                else:
+                    lidar_extent = [0, lidar_hw[1], 0, lidar_hw[0]]
 
         # Extract peak offset values
         peak_x_offset, peak_y_offset = peak_offset
@@ -517,7 +628,7 @@ def plot_correlation_2d(
         axes_bottom[2].grid(True, alpha=0.3, linestyle=":", linewidth=0.5, color='white')
     else:
         # No imagery available, show message in all bottom panels
-        for i in range(3):
+        for i in range(num_method_cols):
             axes_bottom[i].text(
                 0.5, 0.5,
                 "Imagery Not Available",
@@ -527,6 +638,106 @@ def plot_correlation_2d(
             )
             axes_bottom[i].set_title(f"Method {i+1} Imagery Overlay", fontsize=12, fontweight="bold")
             axes_bottom[i].axis('off')
+
+    if lidar_extent is None and lidar_hw is not None:
+        if use_meters:
+            lidar_extent = [0, lidar_hw[1] * resolution, 0, lidar_hw[0] * resolution]
+        else:
+            lidar_extent = [0, lidar_hw[1], 0, lidar_hw[0]]
+
+    if lidar_axes:
+        panel_specs: list[
+            tuple[str, np.ndarray | np.ma.MaskedArray, str, str, float | None, str | None]
+        ] = []
+        if lidar_height_display is not None:
+            fill_rate = None
+            fill_source: str | None = None
+            if mask_valid_count is not None and total_valid_pixels > 0:
+                fill_rate = mask_valid_count / total_valid_pixels
+                fill_source = "mask"
+            elif total_valid_pixels > 0 and "height" in valid_counts:
+                fill_rate = valid_counts["height"] / total_valid_pixels
+                fill_source = "finite"
+            panel_specs.append(
+                ("LiDAR Height", lidar_height_display, "turbo", "Normalized Height", fill_rate, fill_source)
+            )
+        if lidar_intensity_display is not None:
+            fill_rate = None
+            fill_source = None
+            if mask_valid_count is not None and total_valid_pixels > 0:
+                fill_rate = mask_valid_count / total_valid_pixels
+                fill_source = "mask"
+            elif total_valid_pixels > 0 and "intensity" in valid_counts:
+                fill_rate = valid_counts["intensity"] / total_valid_pixels
+                fill_source = "finite"
+            panel_specs.append(
+                ("LiDAR Intensity", lidar_intensity_display, "gray", "Normalized Intensity", fill_rate, fill_source)
+            )
+
+        for ax, (title, data, cmap_name, colorbar_label, fill_rate, fill_source) in zip(lidar_axes, panel_specs):
+            if data is not None:
+                if lidar_extent is not None:
+                    im_panel = ax.imshow(
+                        data,
+                        origin="lower",
+                        extent=lidar_extent,
+                        cmap=cmap_name,
+                    )
+                else:
+                    im_panel = ax.imshow(
+                        data,
+                        origin="lower",
+                        cmap=cmap_name,
+                    )
+                ax.set_title(title, fontsize=12, fontweight="bold")
+                ax.set_xlabel(f"X ({unit})")
+                ax.set_ylabel(f"Y ({unit})")
+                if lidar_extent is not None:
+                    ax.set_xlim(lidar_extent[0], lidar_extent[1])
+                    ax.set_ylim(lidar_extent[2], lidar_extent[3])
+                ax.set_aspect('equal', adjustable='box')
+                grid_color = "white" if cmap_name != "gray" else "black"
+                ax.grid(True, alpha=0.3, linestyle=":", linewidth=0.5, color=grid_color)
+                fig.colorbar(im_panel, ax=ax, fraction=0.046, pad=0.04, label=colorbar_label)
+                if fill_rate is not None:
+                    suffix = " (mask)" if fill_source == "mask" else " (finite)"
+                    ax.text(
+                        0.02,
+                        0.94,
+                        f"Fill: {fill_rate * 100:.1f}%{suffix}",
+                        transform=ax.transAxes,
+                        fontsize=10,
+                        fontweight="bold",
+                        color="white" if cmap_name != "gray" else "black",
+                        bbox=dict(boxstyle="round", facecolor="black" if cmap_name != "gray" else "white", alpha=0.6),
+                    )
+            else:
+                ax.text(
+                    0.5,
+                    0.5,
+                    "LiDAR Channel Not Available",
+                    ha="center",
+                    va="center",
+                    fontsize=14,
+                    transform=ax.transAxes,
+                )
+                ax.set_title(title, fontsize=12, fontweight="bold")
+                ax.axis("off")
+
+        # Hide any leftover axes if panel specs fewer than axes
+        if len(panel_specs) < len(lidar_axes):
+            for extra_ax in lidar_axes[len(panel_specs):]:
+                extra_ax.text(
+                    0.5,
+                    0.5,
+                    "LiDAR Channel Not Available",
+                    ha="center",
+                    va="center",
+                    fontsize=14,
+                    transform=extra_ax.transAxes,
+                )
+                extra_ax.set_title("LiDAR Panel", fontsize=12, fontweight="bold")
+                extra_ax.axis("off")
 
     # Overall title
     fig.suptitle(
@@ -589,6 +800,11 @@ def main() -> None:
         action="store_true",
         help="Show all plots including top row (method visualizations). Default: show only imagery overlays.",
     )
+    parser.add_argument(
+        "--lidar",
+        action="store_true",
+        help="Add an extra panel visualizing the LiDAR raster for the selected sample.",
+    )
 
     args = parser.parse_args()
 
@@ -601,9 +817,11 @@ def main() -> None:
 
     # Load single sample (no augmentation)
     sample = load_sample(args.sample, lidar_variant=args.lidar_variant)
-    lidar = sample["lidar"].to(args.device)
+    lidar_tensor = sample["lidar"]
+    lidar = lidar_tensor.to(args.device)
     geospatial = sample["map"].to(args.device)
     resolution = sample["resolution"]
+    lidar_np = lidar_tensor.cpu().numpy() if args.lidar else None
 
     print("\n[Inference] Computing correlation heatmap...")
     results = compute_embeddings_and_correlation(model, lidar, geospatial)
@@ -699,6 +917,7 @@ def main() -> None:
         softmax_score=softmax_score,
         gaussian_score=gaussian_score,
         imagery=imagery_np,
+        lidar_image=lidar_np,
         save_path=args.save,
         show_all=args.all,
     )

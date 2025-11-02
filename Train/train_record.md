@@ -185,8 +185,8 @@ Method2:
          Gaussian RMS (m):   train=(0.529 x, 0.468 y)  | val=(0.483 x, 0.423 y)
 
 # 0.2 
-[Best] Saved model from epoch 93: val_loss=0.6851
-       Theta RMS (deg):     train=0.5219  | val=0.4480
-       Pixel RMS (m):      0.129 x, 0.136 y
-       Softmax RMS (m):    0.101 x, 0.109 y
-       Gaussian RMS (m):   0.104 x, 0.119 y
+[Best] Saved model from epoch 70: val_loss=0.6504
+       Theta RMS (deg):     train=0.4576  | val=0.3980
+       Pixel RMS (m):      0.140 x, 0.136 y
+       Softmax RMS (m):    0.105 x, 0.106 y
+       Gaussian RMS (m):   0.115 x, 0.114 y

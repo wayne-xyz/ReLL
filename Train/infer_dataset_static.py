@@ -91,7 +91,18 @@ def process_single_sample(
     try:
         # Load sample
         sample = load_sample(sample_path, lidar_variant=lidar_variant)
-        lidar = sample["lidar"].to(device)
+        lidar_tensor = sample["lidar"]
+
+        # Compute LiDAR fill rate (percentage of valid pixels)
+        if lidar_tensor.dim() >= 3 and lidar_tensor.shape[0] >= 3:
+            mask_channel = lidar_tensor[2]
+            fill_rate = float((mask_channel >= 0.5).float().mean().item())
+        else:
+            reference_channel = lidar_tensor[0]
+            finite_mask = torch.isfinite(reference_channel)
+            fill_rate = float(finite_mask.float().mean().item())
+
+        lidar = lidar_tensor.to(device)
         geospatial = sample["map"].to(device)
 
         # Compute correlation heatmap
@@ -149,6 +160,7 @@ def process_single_sample(
             'softmax': (float(softmax_x_m), float(softmax_y_m)),
             'gaussian': (float(gaussian_x_m), float(gaussian_y_m)),
             'theta': float(theta_error_deg),
+            'fill_rate': float(fill_rate),
             'success': True,
         }
 
@@ -159,6 +171,7 @@ def process_single_sample(
             'softmax': (0.0, 0.0),
             'gaussian': (0.0, 0.0),
             'theta': 0.0,
+            'fill_rate': 0.0,
             'success': False,
         }
 
@@ -406,6 +419,254 @@ def plot_error_distributions(
     plt.show()
 
 
+def plot_fill_rate_vs_distance(
+    gaussian_positions: np.ndarray,
+    fill_rates: np.ndarray,
+    save_path: Path | None = None,
+) -> None:
+    """
+    Analyze fill rate vs radial distance from ground truth.
+    This directly answers: does position error correlate with fill rate?
+
+    Args:
+        gaussian_positions: Nx2 array of (x, y) errors from Gaussian method (in meters).
+        fill_rates: N-length array of LiDAR fill rates (0.0–1.0).
+        save_path: Optional path to save the plot (suffix `_fill_vs_dist` will be appended).
+    """
+    if gaussian_positions.size == 0 or fill_rates.size == 0:
+        print("[Plot] Skipping fill rate vs distance analysis (no data).")
+        return
+
+    # Compute radial distance from ground truth
+    distances = np.sqrt(gaussian_positions[:, 0]**2 + gaussian_positions[:, 1]**2)
+
+    # Compute Pearson correlation
+    correlation = np.corrcoef(distances, fill_rates)[0, 1]
+
+    fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+
+    # Top subplot: Scatter plot with trend line
+    ax1 = axes[0]
+    scatter = ax1.scatter(
+        distances,
+        fill_rates * 100,  # Convert to percentage
+        c=fill_rates,
+        cmap='viridis',
+        s=50,
+        alpha=0.5,
+        edgecolors='black',
+        linewidths=0.3,
+        vmin=0.0,
+        vmax=1.0,
+    )
+
+    # Add trend line
+    z = np.polyfit(distances, fill_rates * 100, 1)
+    p = np.poly1d(z)
+    x_trend = np.linspace(distances.min(), distances.max(), 100)
+    ax1.plot(x_trend, p(x_trend), "r--", linewidth=2,
+            label=f'Trend (Pearson r={correlation:.3f})')
+
+    ax1.set_xlabel('Distance from Ground Truth (m)', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Fill Rate (%)', fontsize=12, fontweight='bold')
+    ax1.set_title(
+        f'Fill Rate vs Position Error Distance (N={len(fill_rates)} samples)',
+        fontsize=13, fontweight='bold'
+    )
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(fontsize=10, loc='best')
+    ax1.set_ylim([0, 105])
+
+    # Bottom subplot: Box plot by distance bins
+    ax2 = axes[1]
+    max_dist = distances.max()
+
+    # Define distance bins dynamically
+    if max_dist <= 2.0:
+        distance_bins = [0, 0.5, 1.0, 2.0, max_dist + 0.01]
+        bin_labels = ['0-0.5m', '0.5-1m', '1-2m', f'2m+']
+    elif max_dist <= 5.0:
+        distance_bins = [0, 0.5, 1.0, 2.0, 5.0, max_dist + 0.01]
+        bin_labels = ['0-0.5m', '0.5-1m', '1-2m', '2-5m', f'5m+']
+    else:
+        distance_bins = [0, 0.5, 1.0, 2.0, 5.0, 10.0, max_dist + 0.01]
+        bin_labels = ['0-0.5m', '0.5-1m', '1-2m', '2-5m', '5-10m', '10m+']
+
+    binned_data = []
+    actual_labels = []
+    bin_stats = []
+
+    for i in range(len(distance_bins) - 1):
+        mask = (distances >= distance_bins[i]) & (distances < distance_bins[i+1])
+        if mask.sum() > 0:
+            binned_fill_rates = fill_rates[mask] * 100
+            binned_data.append(binned_fill_rates)
+            actual_labels.append(f'{bin_labels[i]}\n(n={mask.sum()})')
+            bin_stats.append({
+                'count': mask.sum(),
+                'mean': np.mean(binned_fill_rates),
+                'median': np.median(binned_fill_rates),
+            })
+
+    if binned_data:
+        bp = ax2.boxplot(binned_data, labels=actual_labels, patch_artist=True,
+                        medianprops=dict(color='red', linewidth=2),
+                        boxprops=dict(facecolor='lightblue', alpha=0.7),
+                        showmeans=True,
+                        meanprops=dict(marker='D', markerfacecolor='green', markersize=6))
+
+        ax2.set_xlabel('Distance Bin', fontsize=12, fontweight='bold')
+        ax2.set_ylabel('Fill Rate (%)', fontsize=12, fontweight='bold')
+        ax2.set_title('Fill Rate Distribution by Error Distance', fontsize=13, fontweight='bold')
+        ax2.grid(True, alpha=0.3, axis='y')
+        ax2.set_ylim([0, 105])
+
+    plt.tight_layout()
+
+    if save_path is not None:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path = save_path.parent / (save_path.stem + '_fill_vs_dist' + save_path.suffix)
+        plt.savefig(output_path, dpi=200, bbox_inches='tight')
+        print(f"[Save] Radial fill rate analysis saved to: {output_path}")
+
+    plt.show()
+
+    # Print correlation statistics
+    print(f"\n[Analysis] Fill Rate vs Position Error Distance:")
+    print(f"  Pearson Correlation: {correlation:.4f}")
+    if abs(correlation) < 0.1:
+        print(f"  → Very weak/no correlation (fill rate doesn't explain position error)")
+    elif abs(correlation) < 0.3:
+        print(f"  → Weak correlation")
+    elif abs(correlation) < 0.7:
+        print(f"  → Moderate correlation")
+    else:
+        print(f"  → Strong correlation")
+
+    # Print bin statistics
+    if bin_stats:
+        print(f"\n  Distance Bin Statistics:")
+        for i, (label, stats) in enumerate(zip(bin_labels[:len(bin_stats)], bin_stats)):
+            print(f"    {label:12s}: n={stats['count']:4d}, mean={stats['mean']:5.1f}%, median={stats['median']:5.1f}%")
+
+
+def plot_fill_rate_directional(
+    gaussian_positions: np.ndarray,
+    fill_rates: np.ndarray,
+    save_path: Path | None = None,
+) -> None:
+    """
+    Analyze fill rate by direction/angle from ground truth.
+    Shows if certain directions have systematically different fill rates.
+
+    Args:
+        gaussian_positions: Nx2 array of (x, y) errors from Gaussian method (in meters).
+        fill_rates: N-length array of LiDAR fill rates (0.0–1.0).
+        save_path: Optional path to save the plot (suffix `_geometry_directional` will be appended).
+    """
+    if gaussian_positions.size == 0 or fill_rates.size == 0:
+        print("[Plot] Skipping directional analysis (no data).")
+        return
+
+    x_errors = gaussian_positions[:, 0]
+    y_errors = gaussian_positions[:, 1]
+
+    # Compute polar coordinates
+    distances = np.sqrt(x_errors**2 + y_errors**2)
+    angles_rad = np.arctan2(y_errors, x_errors)  # -π to π
+    angles_deg = np.degrees(angles_rad)  # -180 to 180
+
+    # Normalize to 0-360
+    angles_deg = (angles_deg + 360) % 360
+
+    fig = plt.figure(figsize=(14, 11))
+
+    # Top: Polar scatter plot
+    ax1 = plt.subplot(2, 1, 1, projection='polar')
+    scatter = ax1.scatter(
+        angles_rad,
+        distances,
+        c=fill_rates * 100,
+        cmap='RdYlGn',
+        s=60,
+        alpha=0.6,
+        edgecolors='black',
+        linewidths=0.3,
+        vmin=0,
+        vmax=100,
+    )
+
+    ax1.set_theta_zero_location('E')  # 0° = East (positive X)
+    ax1.set_theta_direction(-1)  # Clockwise
+    ax1.set_title('Polar View: Fill Rate by Direction & Distance',
+                 fontsize=13, fontweight='bold', pad=20)
+    ax1.set_ylabel('Distance (m)', fontsize=11, fontweight='bold')
+
+    cbar1 = plt.colorbar(scatter, ax=ax1, pad=0.1, fraction=0.046)
+    cbar1.set_label('Fill Rate (%)', fontsize=10, fontweight='bold')
+
+    # Bottom: Angular binning analysis
+    ax2 = plt.subplot(2, 1, 2)
+
+    # Define angular sectors (8 directions)
+    n_sectors = 8
+    sector_size = 360 / n_sectors
+    sector_labels = ['E', 'NE', 'N', 'NW', 'W', 'SW', 'S', 'SE']
+
+    sector_data = []
+    sector_names = []
+    sector_stats = []
+
+    for i in range(n_sectors):
+        start_angle = i * sector_size
+        end_angle = (i + 1) * sector_size
+
+        mask = (angles_deg >= start_angle) & (angles_deg < end_angle)
+        count = mask.sum()
+
+        if count > 0:
+            sector_fill = fill_rates[mask] * 100
+            sector_data.append(sector_fill)
+            sector_names.append(f'{sector_labels[i]}\n(n={count})')
+            sector_stats.append({
+                'direction': sector_labels[i],
+                'count': count,
+                'mean': np.mean(sector_fill),
+                'median': np.median(sector_fill),
+            })
+
+    if sector_data:
+        bp = ax2.boxplot(sector_data, labels=sector_names, patch_artist=True,
+                        medianprops=dict(color='red', linewidth=2),
+                        boxprops=dict(facecolor='lightgreen', alpha=0.6),
+                        showmeans=True,
+                        meanprops=dict(marker='D', markerfacecolor='blue', markersize=6))
+
+        ax2.set_xlabel('Direction Sector', fontsize=12, fontweight='bold')
+        ax2.set_ylabel('Fill Rate (%)', fontsize=12, fontweight='bold')
+        ax2.set_title('Fill Rate Distribution by Direction (8 Sectors)',
+                     fontsize=13, fontweight='bold')
+        ax2.grid(True, alpha=0.3, axis='y')
+        ax2.set_ylim([0, 105])
+
+    plt.tight_layout()
+
+    if save_path is not None:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path = save_path.parent / (save_path.stem + '_geometry_directional' + save_path.suffix)
+        plt.savefig(output_path, dpi=200, bbox_inches='tight')
+        print(f"[Save] Directional analysis plot saved to: {output_path}")
+
+    plt.show()
+
+    # Print directional statistics
+    if sector_stats:
+        print(f"\n[Analysis] Fill Rate by Direction:")
+        for stats in sector_stats:
+            print(f"  {stats['direction']:3s}: n={stats['count']:4d}, "
+                  f"mean={stats['mean']:5.1f}%, median={stats['median']:5.1f}%")
+
+
 def compute_theta_statistics(theta_errors: np.ndarray) -> None:
     """
     Compute and print comprehensive statistics for theta (rotation) prediction.
@@ -509,6 +770,7 @@ def main() -> None:
     softmax_results = []
     gaussian_results = []
     theta_results = []
+    fill_rates = []
 
     for sample_path in tqdm(sample_dirs, desc="Processing samples"):
         result = process_single_sample(
@@ -524,12 +786,14 @@ def main() -> None:
             softmax_results.append(result['softmax'])
             gaussian_results.append(result['gaussian'])
             theta_results.append(result['theta'])
+            fill_rates.append(result['fill_rate'])
 
     # Convert to numpy arrays
     peak_positions = np.array(peak_results)
     softmax_positions = np.array(softmax_results)
     gaussian_positions = np.array(gaussian_results)
     theta_errors = np.array(theta_results)
+    fill_rates = np.array(fill_rates)
 
     print(f"\n[Process] Successfully processed {len(peak_positions)} samples")
 
@@ -648,6 +912,24 @@ def main() -> None:
         gaussian_positions[:, 1],  # Y errors from Gaussian method
         save_path=args.save,
     )
+
+    # Plot LiDAR fill rate vs distance analysis
+    if len(fill_rates) > 0:
+        print("\n[Plot] Analyzing LiDAR fill rate vs. position error distance...")
+        plot_fill_rate_vs_distance(
+            gaussian_positions,
+            fill_rates,
+            save_path=args.save,
+        )
+
+    # Plot directional/geometric analysis of fill rate
+    if len(fill_rates) > 0:
+        print("\n[Plot] Analyzing fill rate by direction (geometric analysis)...")
+        plot_fill_rate_directional(
+            gaussian_positions,
+            fill_rates,
+            save_path=args.save,
+        )
 
 
 if __name__ == "__main__":
