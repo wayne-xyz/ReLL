@@ -1,0 +1,28 @@
+# Core training dependencies
+torch
+torchvision
+numpy
+pyyaml
+matplotlib
+tqdm
+
+# Optional / data-preprocessing (used by Data-pipeline-fetch, Argoverse scripts, utilities)
+rasterio
+laspy[lazrs,laszip]
+open3d
+pyproj
+Pillow
+geopandas
+shapely
+
+# Scientific / utilities
+scipy
+scikit-image
+pandas
+
+# Notes:
+# - This file lists packages required across training, inference, and the
+#   dataset preprocessing pipeline. Some packages (e.g., open3d, laspy,
+#   rasterio) are only needed for data preparation / GICP alignment and
+#   utilities scripts. Install everything with the command below, or
+#   install only the subset you need.
