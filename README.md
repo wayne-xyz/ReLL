@@ -1,4 +1,4 @@
-# ReLL: Reproduce Learned Localization with GICP Registration
+# ReLL: Reproduce Learned Localization with GICP Registration of Lidar&DSM
 
 ## Overview
 
